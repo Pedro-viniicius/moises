@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import { custo, tokensDe } from './precos.js';
 
+const BLOCO = 4 * 1024 * 1024;
 export const FUSO = process.env.MOISES_FUSO || 'America/Sao_Paulo';
 const fmtDia = new Intl.DateTimeFormat('sv-SE', { timeZone: FUSO, year: 'numeric', month: '2-digit', day: '2-digit' });
 export const diaLocal = (ms) => fmtDia.format(new Date(ms));
@@ -88,14 +89,16 @@ export function lerNovidades(caminho, est, opts = { principal: true }) {
     if (st.size < est.offset) Object.assign(est, novoEstado()); // arquivo truncado/recriado
     if (st.size === est.offset) return false;
     fd = fs.openSync(caminho, 'r');
-    const tamanho = st.size - est.offset;
-    const buf = Buffer.alloc(tamanho);
-    fs.readSync(fd, buf, 0, tamanho, est.offset);
-    est.offset = st.size;
-    const texto = est.resto + buf.toString('utf8');
-    const linhas = texto.split('\n');
-    est.resto = linhas.pop(); // linha incompleta fica para a próxima leitura
-    for (const l of linhas) if (l.trim()) processarLinha(est, l, opts);
+    // Em blocos, para um transcript de dezenas de MB não ocupar memória de uma vez.
+    const buf = Buffer.alloc(BLOCO);
+    while (est.offset < st.size) {
+      const n = fs.readSync(fd, buf, 0, Math.min(BLOCO, st.size - est.offset), est.offset);
+      if (n <= 0) break;
+      est.offset += n;
+      const linhas = (est.resto + buf.toString('utf8', 0, n)).split('\n');
+      est.resto = linhas.pop(); // linha incompleta fica para o próximo bloco
+      for (const l of linhas) if (l.trim()) processarLinha(est, l, opts);
+    }
     return true;
   } catch (err) {
     if (err.code !== 'ENOENT') est.linhasRuins++;

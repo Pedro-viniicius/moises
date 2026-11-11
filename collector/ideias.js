@@ -92,6 +92,7 @@ export class Ideias {
     this.chamar = chamar;
     this.agora = agora;
     this.ocupado = false;
+    fs.mkdirSync(this.pasta, { recursive: true });
     try {
       this.d = JSON.parse(fs.readFileSync(this.arquivo, 'utf8'));
     } catch {
@@ -127,7 +128,8 @@ export class Ideias {
   precisa(s) {
     const g = this.d.porSessao[s.chave];
     if (!g) return true;
-    return g.assinatura !== this.assinatura(s) && this.agora() - g.em > INTERVALO_MIN_MS;
+    if (this.agora() - g.em <= INTERVALO_MIN_MS) return false;
+    return g.falhou || g.assinatura !== this.assinatura(s);
   }
 
   async gerar(s, hoje) {
@@ -140,7 +142,7 @@ export class Ideias {
       // Mesmo se falhar, guarda a assinatura para não insistir na mesma sessão a cada ciclo.
       this.d.porSessao[s.chave] = lido
         ? { ...lido, assinatura: this.assinatura(s), em: this.agora() }
-        : { ...(this.d.porSessao[s.chave] || { ideias: [], complexidade: null, motivo: '' }), assinatura: this.assinatura(s), em: this.agora() };
+        : { ...(this.d.porSessao[s.chave] || { ideias: [], complexidade: null, motivo: '' }), assinatura: this.assinatura(s), em: this.agora(), falhou: true };
       if (!lido) console.error('[ideias] sem resposta válida:', r.erro || 'formato');
       this.salvar();
     } finally {

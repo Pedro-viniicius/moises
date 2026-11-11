@@ -255,3 +255,18 @@ test('ideias: gera uma vez por mudança relevante e respeita o intervalo', async
   id.aplicar(enc);
   assert.equal(chamadas, 2); // sessão encerrada não gera ideias
 });
+
+test('ideias: falha tenta de novo depois do intervalo, sem a sessão precisar mudar', async () => {
+  let agora = 1_000_000_000;
+  let chamadas = 0;
+  const id = new Ideias({ pastaEstado: path.join(tmp(), 'nao-existe-ainda'), agora: () => agora, chamar: async () => (chamadas++, { erro: 'falhou' }) });
+  const ret = () => ({ sessoes: [{ chave: 'k', status: 'ativa', projeto: 'p', tarefa: 't', modelo: 'claude-opus-5-5', esforco: 'high' }] });
+  id.aplicar(ret());
+  await new Promise((r) => setImmediate(r));
+  id.aplicar(ret());
+  assert.equal(chamadas, 1);
+  agora += 11 * 60_000;
+  id.aplicar(ret());
+  await new Promise((r) => setImmediate(r));
+  assert.equal(chamadas, 2);
+});
