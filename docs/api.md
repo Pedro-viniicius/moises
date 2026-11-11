@@ -1,6 +1,6 @@
 # Contrato da API do painel
 
-Todas as rotas respondem JSON. As do painel exigem o cookie `moises` (definido no login); sem ele respondem `401 {"erro": "..."}`. A rota de ingestão usa `Authorization: Bearer <MOISES_TOKEN>` e só é chamada pelo coletor local.
+Todas as rotas respondem JSON. As do painel exigem o cookie `moises` (definido no login); sem ele respondem `401 {"erro": "..."}`. A rota de ingestão usa `Authorization: Bearer <MOISES_TOKEN>` e só é chamada pelo coletor local. As rotas de comandos (`/api/comando`) e de pedido de autorização de aparelho (`/api/aparelho`) só transportam: quem confere assinatura e autoriza aparelho é o coletor, no computador.
 
 Horários são milissegundos desde a época (UTC); o painel mostra em `America/Sao_Paulo`. Custos em US$ (estimativa em preço de API).
 
@@ -77,10 +77,11 @@ Corpo `{"senha": "..."}`.
   ]
 }
 ```
-- `retrato` é `null` até o coletor mandar o primeiro.
+- `retrato` é `null` até o coletor mandar o primeiro, e volta a ser `null` se o coletor ficar 24 h sem mandar outro: o Redis o guarda com validade de 24 h, renovada a cada envio.
 - `sessoes` vem ordenada por `custo`, do maior para o menor. `sugestao` pode faltar. `modelosSemPreco` lista modelos sem preço na tabela (o custo deles entra como zero).
 - Campos da orquestração, preenchidos pelo coletor (o servidor só repassa o retrato; um coletor antigo não os envia, então trate cada um como opcional):
   - Em cada sessão:
+    - Texto de conversa (`ultimaResposta`, `ultimaRespostaEm` e a `tarefa` tirada do primeiro pedido) só vem de sessão `gerenciada`. Na aberta à mão, `ultimaResposta` e `ultimaRespostaEm` são `null` e a `tarefa` que viria do pedido cai para o nome (`tarefaOrigem: "nome"`, ou `null` sem nome).
     - `estado`: `trabalhando`, `esperando_mensagem`, `esperando_permissao`, `parada` (viva, sem atividade há mais de 15 min) ou `encerrada`. O campo antigo `status` continua valendo.
     - `ultimaResposta` e `ultimaRespostaEm`: o último texto do Claude (mascarado, até 1.200 caracteres) e quando saiu. Ficam `null` com `MOISES_SUBIR_TEXTO=0` ou quando não há resposta ainda.
     - `tarefa` e `tarefaOrigem`: a `tarefa` vem do título, do resumo, do primeiro pedido ou do nome da sessão, nesta ordem; `tarefaOrigem` diz de qual (`titulo`, `resumo`, `pedido`, `nome`) ou é `null` se não houver nenhum.
@@ -88,11 +89,11 @@ Corpo `{"senha": "..."}`.
     - `retomavel`: está `encerrada` e a pasta dela está na lista de projetos do coletor (aceita `retomar`).
     - `permissoes`: pedidos de permissão pendentes, `{pedido, ferramenta, entrada, completo, sensivel, criadoEm}`; lista vazia se não houver. `entrada` é o texto mascarado (até 4.000 caracteres, quebras de linha preservadas, caracteres invisíveis trocados por `\u{…}`) e vem vazia com `MOISES_SUBIR_TEXTO=0`. `completo` é falso se o pedido foi cortado, mascarado ou escapado, ou se o nome da ferramenta é estranho: nesse caso só dá para negar. `sensivel` marca pedido que menciona arquivos do Moisés, SSH, variáveis de ambiente, configurações do Claude, hooks do git ou credenciais.
     - `erro`: texto curto (mascarado) quando uma sessão comandada terminou sozinha com falha; fica no retrato por 10 min. `null` nas demais.
-  - No topo do retrato, `orquestracao`: `ativa` (falso se o coletor não tem aparelho autorizado ou está com `MOISES_COMANDOS=0`) e `motivo` (`sem_chave`, `desligado` ou `null`); `projetos`, `contas`, `modelos`, `esforcos` e `modos` são as listas que `abrir` aceita; `maxSessoes` e `abertas` são o teto e o número de sessões comandadas vivas; `aparelhos` lista `kid` e `rotulo` dos aparelhos autorizados.
+  - No topo do retrato, `orquestracao`: `ativa` (falso se o coletor não tem aparelho autorizado, está com `MOISES_COMANDOS=0` ou achou o painel publicado diferente do `public/` do computador) e `motivo` (`sem_chave`, `desligado`, `painel_alterado` ou `null`); `projetos`, `contas`, `modelos`, `esforcos` e `modos` são as listas que `abrir` aceita; `maxSessoes` e `abertas` são o teto e o número de sessões comandadas vivas; `aparelhos` lista `kid` e `rotulo` dos aparelhos autorizados no computador (só os de chave pública; aparelho do formato antigo não aparece). O servidor só aceita comando de um `kid` desta lista (ver `POST /api/comando`).
 - `recebidoEm` é quando o servidor recebeu o último envio do coletor. Se tiver mais de 2 min, o coletor está parado.
 - Cada chamada confere os comandos: o `pendente` com 2 min ou mais desde a chegada ao servidor vira `expirado` na hora (o painel não espera o coletor) e **perde `dados` e `assinatura`** no Redis.
-- `comandos` vem do mais recente para o mais antigo. Nunca traz `dados` nem `assinatura`. `estado` segue `pendente` → `recebido` → `feito` | `falhou`, ou `pendente` → `recusado` | `expirado`. `erro` (até 200 caracteres) vem em `falhou` e `recusado`; `motivo` só em `recusado`, quando o coletor informa um motivo válido (ex.: `assinatura` ou `aparelho` pedem o código do aparelho de novo; `expirado` e `relogio` pedem para conferir a hora). `criadoEm` é o relógio do aparelho que assinou.
-- Cada chamada grava `moises:painelVistoEm` com a hora do servidor; o coletor recebe esse valor no `ingest`.
+- `comandos` vem do mais recente para o mais antigo. Nunca traz `dados` nem `assinatura`. `estado` segue `pendente` → `recebido` → `feito` | `falhou`, ou `pendente` → `recusado` | `expirado`. `erro` (até 200 caracteres) vem em `falhou` e `recusado`; `motivo` só em `recusado`, quando o coletor informa um motivo válido (`/^[a-z_]{1,20}$/`). Os que o coletor usa: `assinatura` e `aparelho` (a chave não confere ou o aparelho não está autorizado: pedem nova autorização do aparelho), `expirado`, `relogio` (relógio do aparelho **adiantado** ou **atrasado**: o `erro` diz qual; os dois pedem para acertar a hora), `repetido`, `ritmo`, `desligado`, `sem_chave`, `formato`, `verbo`, `interno` e `painel_alterado` (o painel publicado não é igual ao `public/` do computador; os comandos ficam desligados até a próxima conferência, a cada 10 min). `criadoEm` é o relógio do aparelho que assinou.
+- A chamada grava `moises:painelVistoEm` com a hora do servidor, **no máximo a cada 30 s** (se o valor guardado tem menos de 30 s, não é regravado; no futuro ou que não é número, é); o coletor recebe esse valor no `ingest` e acelera o envio quando ele tem menos de 60 s.
 
 ## `POST /api/comando`
 Transporta um comando assinado no aparelho. O servidor não tem a chave e **não confere a assinatura**: confere só formato e tamanho. Quem aceita ou recusa é o coletor. Exige o cookie e `content-type: application/json`; corpo de até 40.000 bytes.
@@ -100,7 +101,7 @@ Transporta um comando assinado no aparelho. O servidor não tem a chave e **não
 ```json
 { "v": 1, "kid": "ab2cd3", "id": "c_0123456789abcdef", "tipo": "mensagem", "chave": "principal:<uuid>",
   "criadoEm": 1794387000000, "dados": "{\"texto\":\"...\",\"visto\":{\"projeto\":\"x\",\"nome\":\"y\"}}",
-  "assinatura": "<43 caracteres base64url>" }
+  "assinatura": "<86 caracteres base64url>" }
 ```
 
 | Campo | Regra |
@@ -112,11 +113,11 @@ Transporta um comando assinado no aparelho. O servidor não tem a chave e **não
 | `chave` | `null` em `abrir`; nos outros, `/^[a-z0-9]{1,20}:<uuid em minúsculas>$/` |
 | `criadoEm` | inteiro seguro (relógio do aparelho) |
 | `dados` | string com um objeto JSON, até 8.000 caracteres |
-| `assinatura` | `/^[A-Za-z0-9_-]{43}$/` |
+| `assinatura` | `/^[A-Za-z0-9_-]{86}$/` (ECDSA P-256 em IEEE P1363, 64 bytes) |
 
-Campo fora da tabela também dá `400`. O comando expira se o coletor não o buscar em 2 min (contados da chegada ao servidor); ao receber um comando novo, o servidor também expira os pendentes vencidos, para não guardar conteúdo além da validade nem ocupar vaga.
+Campo fora da tabela também dá `400`. Depois do formato, o servidor confere só se o coletor anunciou o aparelho: o `kid` tem de estar em `retrato.orquestracao.aparelhos` do último retrato. O comando expira se o coletor não o buscar em 2 min (contados da chegada ao servidor); ao receber um comando novo, o servidor também expira os pendentes vencidos, para não guardar conteúdo além da validade nem ocupar vaga.
 
-**Assinatura e `dados` (conferidos só pelo coletor).** `assinatura` é o HMAC-SHA256, em base64url sem `=`, de `JSON.stringify(['moises-cmd-v1', kid, id, tipo, chave ?? '', criadoEm, dados])`, com a chave derivada do código do aparelho (PBKDF2-SHA256, 210.000 iterações). O coletor recusa assinatura errada, aparelho desconhecido, comando com mais de 2 min ou com data mais de 30 s no futuro, id repetido, verbo ou versão desconhecidos e mais de 30 comandos por minuto. `dados` é o objeto JSON, em texto, deste verbo (campo fora da tabela é recusado):
+**Assinatura e `dados` (conferidos só pelo coletor).** `assinatura` é a assinatura ECDSA P-256 com SHA-256, no formato IEEE P1363 (`r || s`, 64 bytes) em base64url sem `=` (86 caracteres), de `JSON.stringify(['moises-cmd-v1', kid, id, tipo, chave ?? '', criadoEm, dados])`. A chave privada nasce no navegador do aparelho, não é extraível e nunca sai dele; o coletor confere com a chave pública que o dono autorizou no computador (`POST /api/aparelho` e `scripts/configurar-comandos.js`). O `kid` é a identificação do aparelho: os 6 primeiros hexadecimais do SHA-256 da chave pública. O servidor já recusa (`400`, campo `assinatura`) a HMAC de 43 caracteres do formato antigo. O coletor recusa assinatura errada, aparelho desconhecido, comando com mais de 2 min ou com data mais de 30 s no futuro, id repetido, verbo ou versão desconhecidos e mais de 30 comandos por minuto. `dados` é o objeto JSON, em texto, deste verbo (campo fora da tabela é recusado):
 
 | Verbo | `dados` |
 |---|---|
@@ -130,9 +131,32 @@ Campo fora da tabela também dá `400`. O comando expira se o coletor não o bus
 `visto` é `{"projeto": "...", "nome": "..." | null}`: o que o cartão mostrava quando você tocou. O coletor recusa se a sessão real for outra.
 - `200 {"id": "c_…"}`
 - `400 {"erro": "Comando inválido (<campo>)."}`: a mensagem cita só o nome do campo, nunca o conteúdo.
+- `403 {"erro": "Este aparelho não está autorizado neste computador."}` se o `kid` não está nos aparelhos que o coletor anunciou (inclusive quando o último retrato é de um coletor antigo, sem a lista).
+- `503 {"erro": "O coletor ainda não mandou o estado deste computador. Tente de novo em instantes."}` se não há retrato legível no Redis (coletor nunca enviou, ou parado há mais de 24 h): sem ele o servidor não sabe quais aparelhos existem.
 - `409` se já existe comando com esse `id`; `429` se já há 20 comandos `pendente`; `413` corpo grande demais; `415` corpo não JSON; `401` sem login.
 
 `POST /api/encerrar` saiu: encerrar agora é `POST /api/comando` com `tipo: "encerrar"` e `dados` `{"nome"?, "visto"}`.
+
+## `POST /api/aparelho`
+Pedido de autorização de um aparelho novo. O navegador gerou um par ECDSA P-256 com a chave privada não extraível e manda só a chave pública, o `kid` e um nome. **Nada aqui autoriza coisa alguma**: o servidor guarda o pedido e o ingest o entrega ao coletor, que o grava no computador; quem autoriza é o dono, no terminal, conferindo a impressão digital (`node scripts/configurar-comandos.js --pedidos` e `--autorizar <kid> <impressão>`). Exige o cookie e `content-type: application/json`; corpo de até 2.000 bytes.
+
+```json
+{ "kid": "a1b2c3", "publica": "<87 caracteres base64url>", "rotulo": "Celular" }
+```
+
+| Campo | Regra |
+|---|---|
+| `kid` | `/^[0-9a-f]{6}$/` e igual aos 6 primeiros hexadecimais do SHA-256 da chave pública `raw` |
+| `publica` | chave pública P-256 `raw` (65 bytes: `0x04`, x e y) em base64url canônico, sem `=`, 87 caracteres, com o ponto na curva |
+| `rotulo` | de 1 a 40 caracteres (contados por caractere, depois de `trim`), sem controle, formatação, separador de linha ou de parágrafo |
+
+Campo fora da tabela também dá `400`.
+- `200 {"kid": "a1b2c3"}`: o pedido foi guardado.
+- `400 {"erro": "Pedido de autorização inválido (<campo>)."}`: a mensagem cita só o nome do campo (`corpo`, `campo desconhecido`, `publica`, `kid` ou `rotulo`), nunca o conteúdo.
+- `429` se já há 5 pedidos de **outros** aparelhos esperando. O mesmo aparelho (mesmo `kid`) pedindo de novo substitui o próprio pedido e não ocupa vaga.
+- `415` corpo não JSON; `413` corpo grande demais; `401` sem login; `405` outro método.
+
+Os pedidos ficam no hash do Redis `moises:aparelhos-pedidos` (um campo por `kid`), **no máximo 5 e cada um por 1 h**: os vencidos são apagados nas chamadas seguintes (deste endpoint e do ingest). O servidor não confere se o aparelho é seu; o coletor e o script conferem tudo de novo (o `kid` ser o da própria chave, o ponto na curva e o nome) antes de mostrar o pedido, e a impressão digital exigida em `--autorizar` é o que prende a chave gravada à que o aparelho mostra.
 
 ## `GET /api/logs?q=texto`
 `200 {"logs": [ { "id", "chave", "nome", "projeto", "conta", "tarefa", "resumo", "iniciadaEm", "encerradaEm", "duracaoMs", "modelo", "esforco", "porModelo", "tokens", "custo", "criadoEm" } ]}`, do mais recente para o mais antigo (guarda os 500 mais recentes); `q` filtra por nome, projeto ou resumo.
@@ -141,9 +165,12 @@ Campo fora da tabela também dá `400`. O comando expira se o coletor não o bus
 Corpo `{"id": "...", "nome": "..."}` → `200 {"ok": true}`; `404` se não existir.
 
 ## `POST /api/ingest` (só o coletor)
-Corpo `{"retrato": {...} | null, "acks": [...]}` → `200 {"comandos": [{"v", "kid", "id", "tipo", "chave", "criadoEm", "dados", "assinatura", "idadeMs"}], "painelVistoEm": 1794356795887 | null}`.
+Corpo `{"protocolo": 2, "retrato": {...} | null, "acks": [...]}` → `200 {"comandos": [{"v", "kid", "id", "tipo", "chave", "criadoEm", "dados", "assinatura", "idadeMs"}], "painelVistoEm": 1794356795887 | null, "aparelhosPedidos": [{"kid", "publica", "rotulo", "criadoEm"}]}`.
+- `protocolo`: só o coletor que confere assinatura manda `2`. **Sem `protocolo: 2`, o servidor não entrega comando nenhum** (`comandos: []`, e também sem `aparelhosPedidos`): um coletor antigo executaria `encerrar` sem conferir assinatura. Os comandos pendentes continuam guardados até expirar ou até um coletor novo buscar.
+- `retrato`: guardado em `moises:retrato` com validade de 24 h (`EX`), renovada a cada retrato recebido.
 - `comandos`: os pendentes, no máximo 20, do mais antigo para o mais novo, inteiros como o aparelho assinou. `idadeMs` conta da chegada ao servidor (não do relógio do aparelho). Pendente com 2 min ou mais vira `expirado` e não é entregue.
-- `painelVistoEm`: a última vez que o painel chamou `GET /api/estado` (hora do servidor), ou `null`.
+- `painelVistoEm`: a última vez que o painel chamou `GET /api/estado` (hora do servidor, com precisão de 30 s: ele só é regravado a cada 30 s), ou `null`.
+- `aparelhosPedidos`: os pedidos de autorização de aparelho de `POST /api/aparelho` ainda dentro de 1 h, do mais antigo para o mais novo. O coletor confere cada um de novo (o servidor não é confiável) e grava os válidos, no máximo 5, em `aparelhos-pedidos.json` (600) na pasta de estado, para `--pedidos` listar. Os pedidos vencidos são apagados do Redis nesta chamada.
 - Ack: `{"id", "estado": "recebido" | "feito" | "falhou" | "recusado", "erro", "motivo", "log", "chaveNova"}`. Por compatibilidade, também `{"id", "ok", "erro", "log"}` (`ok: true` vale `feito`; `false`, `falhou`).
   - Qualquer ack de um comando conhecido apaga `dados` e `assinatura` do Redis; a expiração também.
   - O estado só anda para a frente (ack atrasado não desfaz `feito`); um comando `expirado` ainda aceita o ack do coletor.

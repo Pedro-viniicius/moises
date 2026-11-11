@@ -13,7 +13,7 @@ Orientação da ferramenta de apoio (`ui-ux-pro-max`, consultas `destructive act
 1. Abre o painel. O retrato traz `estado`, `ultimaResposta`, `gerenciada`, `retomavel`, `permissoes` (cada uma com `completo` e `sensivel`) por sessão e `orquestracao` no topo (`maxSessoes`, `abertas`, `aparelhos`). Todo comando sobre uma sessão leva `visto` (projeto e nome que o cartão mostrava) e o coletor o recusa se a sessão real for outra (CA8). O painel decide por sessão o que mostrar (matriz na seção Componentes, item 5).
 2. Uma sessão pede permissão: o selo do cartão muda para "Pedindo permissão", o cartão ganha borda âmbar, o contador no resumo sobe e o leitor de tela ouve uma frase. O dono abre o cartão, lê ferramenta e entrada, e toca Aprovar ou Negar.
 3. Qualquer comando: o toque envia na hora; a linha de andamento mostra Enviado → Recebido pelo coletor → Executado (ou Recusado, Falhou, Expirado). A tela consulta o servidor a cada 2 s enquanto houver comando em andamento e volta aos 15 s de hoje depois.
-4. Na primeira vez no aparelho, o primeiro comando abre o diálogo do código do aparelho; guardada a chave, o comando que o dono tinha pedido segue sozinho.
+4. Aparelho ainda não autorizado no computador: o primeiro comando abre o diálogo "Autorizar este aparelho" (o aparelho pede autorização e o dono a dá no computador, pelo terminal) e **o comando não é enviado**; depois de autorizado, o dono toca de novo.
 5. "Nova sessão": botão acima do filtro → formulário → resumo → enviar → linha de andamento sob o botão → a sessão aparece na lista.
 
 ## Layout (mobile e desktop)
@@ -59,7 +59,7 @@ O `.acao` atual (botão Encerrar no fim) é substituído pela linha "Ações" do
 | Linha de andamento (`.andamento`, `.passos`) | novo, estende `.acao-estado` | idem |
 | Confirmação inline | existente (`.confirmar`) reaproveitado para Interromper e Retomar | idem |
 | Botão e diálogo "Nova sessão" | novo; `<dialog>` nativo | `index.html`, `app.js`, `style.css` |
-| Diálogo do código do aparelho | novo; `<dialog>` nativo | idem |
+| Diálogo "Autorizar este aparelho" (`#dlg-aparelho`) | novo; `<dialog>` nativo, duas etapas | idem |
 | Guarda da chave (IndexedDB) | novo, sem interface | `public/cofre.js` |
 | Rodapé "Este aparelho" | novo | `index.html`, `app.js` |
 | Região viva global `#anuncios` | nova, só para leitor de tela (`.so-leitor`) | `index.html` |
@@ -136,10 +136,10 @@ Estados:
 | `completo: true` | Aprovar e Negar habilitados |
 | `completo: false` | só Negar, com o texto acima |
 | `sensivel: true` | aviso do item 3 antes dos botões e **só Negar**, mesmo com `completo: true` |
-| Aparelho sem código | Aprovar e Negar aparecem normais; ao tocar, `enviarComando` abre o diálogo do código (item 8) e, guardado o código, a resposta segue sozinha |
+| Aparelho não autorizado | Aprovar e Negar aparecem normais; ao tocar, `enviarComando` abre o diálogo "Autorizar este aparelho" (item 8) e a resposta **não** é enviada; depois de autorizado no computador, o dono toca de novo |
 | Enviando resposta | os dois botões desabilitados, o clicado vira "Aprovando…" ou "Negando…" |
 | Respondido | o bloco fica, com os botões trocados por "Resposta enviada. Aguardando o coletor." até o pedido sumir de `permissoes` na próxima consulta; some do DOM com o foco indo para o título da seção "Última resposta" (ou, se o cartão fechou, para o cabeçalho do cartão) |
-| Recusado pelo coletor | `.acao-estado.erro` dentro do bloco com o texto do motivo (item 6). Se o motivo for `assinatura` ou `aparelho`, mais "Digitar o código de novo". Se o coletor disser que o pedido não está mais pendente ou que mudou, o bloco some na consulta seguinte; nos demais casos os botões voltam |
+| Recusado pelo coletor | `.acao-estado.erro` dentro do bloco com o texto do motivo (item 6). Se o motivo for `assinatura` ou `aparelho`, mais "Autorizar este aparelho". Se o coletor disser que o pedido não está mais pendente ou que mudou, o bloco some na consulta seguinte; nos demais casos os botões voltam |
 | Erro antes de chegar ao servidor | `.acao-estado.erro` dentro do bloco, texto do item 6 ("Não enviado: …"); botões voltam |
 | Coletor fora do ar ou orquestração desligada | pedido visível (último conhecido), botões desabilitados e ligados por `aria-describedby` ao motivo das ações (item 9). Com o coletor fora do ar, o bloco ainda ganha a faixa própria "O coletor está fora do ar. Este pedido pode já ter sido resolvido." |
 | Entrada longa | o `<pre>` cresce até mostrar tudo, quebrando linhas longas; nunca estoura a coluna |
@@ -194,17 +194,19 @@ Frases por verbo (pendente / recebido / feito): **mensagem**: acima. **permissao
 
 | `motivo` | Texto (depois de "O coletor recusou a mensagem:") | Ação extra |
 |---|---|---|
-| `assinatura`, `aparelho` | "o código deste aparelho não foi aceito pelo computador." | botão `.btn-leve` "Digitar o código de novo" (abre o diálogo do item 8) |
+| `assinatura` | "a chave deste aparelho não foi aceita pelo computador." | botão `.btn-leve` "Autorizar este aparelho" (abre o diálogo do item 8) |
+| `aparelho` | "este aparelho não está autorizado no computador (ou a autorização foi revogada)." | idem |
 | `relogio` (relógio do aparelho adiantado ou atrasado: o coletor manda o erro certo em cada caso) | "o relógio deste aparelho está errado. Acerte a data e a hora (de preferência no automático) e tente de novo." | nenhuma |
 | `expirado` | "o pedido demorou mais de 2 minutos para chegar e não foi executado. Tente de novo." | nenhuma |
 | `repetido` | "este pedido já tinha sido recebido." | nenhuma |
 | `ritmo` | "pedidos demais em pouco tempo. Espere um minuto e tente de novo." | nenhuma |
 | `desligado` | "os comandos estão desligados neste computador." | nenhuma |
-| `sem_chave` | "o computador não tem nenhum código de aparelho configurado." | nenhuma |
+| `sem_chave` | "o computador não tem nenhum aparelho autorizado." | nenhuma |
 | `formato` | "o pedido veio em formato inválido." | nenhuma |
 | `verbo` | "este tipo de pedido não é aceito." | nenhuma |
 | `interno` | "erro interno do coletor. Tente de novo; se repetir, veja o log no computador." | nenhuma |
-| outro ou ausente | "motivo não informado." | nenhuma |
+| `painel_alterado` (e qualquer outro motivo fora desta lista) | sem texto próprio no mapa: mostra o `erro` do coletor como veio (para `painel_alterado`: "O painel publicado é diferente do código deste computador; comandos desligados.") ou, se vier vazio, "motivo não informado." | nenhuma |
+| ausente | o `erro` do coletor, se houver; senão "motivo não informado." | nenhuma |
 
 Recusas que o contrato não lista como motivo (sessão diferente da que você viu, teto de sessões, de aberturas ou de gasto): o painel mostra o texto de `erro` como veio, pois o coletor já o escreve em português e sem dado de sessão. Para `falhou` usa-se sempre `erro` (ou "motivo não informado" se vier vazio). O `<erro>` da tabela do item 6 é, portanto, o texto do motivo acima ou o `erro` do coletor. `recusado` e `falhou` usam `role="alert"` em vez de `status` (anúncio imediato, uma vez).
 
@@ -216,7 +218,8 @@ Erro antes de chegar ao servidor (não há comando ainda): `.acao-estado.erro` "
 
 | Situação | Botão | Texto abaixo (`.acao-estado`) |
 |---|---|---|
-| `orquestracao` ausente ou `ativa` falso | desabilitado | "A orquestração está desligada neste computador. Rode `node scripts/configurar-comandos.js` nele para ligar." |
+| `orquestracao.ativa` falso com motivo `sem_chave` | desabilitado | "Nenhum aparelho está autorizado neste computador. Use "Autorizar este aparelho", no fim da página." |
+| `orquestracao` ausente ou `ativa` falso por outro motivo (`desligado`, `painel_alterado`) | desabilitado | "A orquestração está desligada neste computador." |
 | `ativa` e `projetos` vazio | desabilitado | "Nenhum projeto permitido neste computador. Adicione projetos ao arquivo projetos.json, em ~/.config/moises." |
 | `abertas >= maxSessoes` | desabilitado | "Limite de <maxSessoes> sessões abertas pelo painel. Encerre uma para abrir outra." |
 | Coletor fora do ar | desabilitado | motivo do item 9 |
@@ -247,27 +250,34 @@ Validação: ao sair do campo (blur) e ao tocar "Revisar"; erro em `<p class="ca
 
 Enviando: "Abrir sessão" vira "Enviando…" e os dois botões ficam desabilitados. Sucesso (servidor aceitou): o diálogo fecha, o foco vai para o botão "Nova sessão" e a linha de andamento do "abrir" aparece embaixo dele. Erro: faixa `role="alert"` dentro do resumo com o motivo (item 6, erros antes do servidor) e os botões voltam. O formulário guarda os valores até a sessão aparecer ou o diálogo ser cancelado; ao reabrir depois de enviar, vem limpo.
 
-### 8. Código do aparelho
+### 8. Autorizar este aparelho
 
-O código tem o formato `xxxxxx-xxxx-xxxx-xxxx-xxxx` (22 caracteres em 5 grupos, alfabeto sem `i`, `l`, `o`, `0`, `1`). Os 6 primeiros são o identificador público do aparelho (`kid`). Dele sai uma chave não extraível, guardada por `public/cofre.js` no **IndexedDB**; o código digitado nunca é guardado nem enviado, e o campo é limpo ao fechar o diálogo.
+Não há código nem segredo digitado no aparelho (achado A1). Na primeira vez, o aparelho gera no próprio navegador um par de chaves ECDSA P-256: a privada é **não extraível** e fica no **IndexedDB** (`public/cofre.js`, que guarda `{kid, chave, publica}`); a pública, que não é segredo, vai ao servidor num pedido de autorização (`POST /api/aparelho`). O `kid` (6 hexadecimais) e a **impressão digital** (16 hexadecimais em 4 grupos de 4, como `a1b2-c3d4-e5f6-0718`) saem do SHA-256 da chave pública. Quem autoriza é o dono, **no computador, pelo terminal**, conferindo que a impressão digital que o computador mostra é a que o celular mostra.
 
-Diálogo `<dialog class="dialogo">` aberto por `enviarComando` quando o aparelho não tem chave, pelo rodapé e pelo botão "Digitar o código de novo".
+Diálogo `<dialog id="dlg-aparelho" class="dialogo">`, título "Autorizar este aparelho" e botão `.btn-leve` "Fechar" no topo. É aberto pelo rodapé ("Autorizar este aparelho" sem chave; "Ver como autorizar" com chave ainda não autorizada), pelo botão "Autorizar este aparelho" que aparece na linha de andamento e no bloco de permissão quando o coletor recusa com `assinatura` ou `aparelho`, e por `enviarComando` quando o aparelho não está autorizado (o comando não sai). Sem chave abre na etapa 1; com chave ainda não autorizada, na etapa 2.
 
-Conteúdo: título "Código do aparelho". Texto: "Este aparelho ainda não pode mandar comandos ao seu computador. Digite o código que o computador gerou para ele. O código não fica guardado: só uma chave que não pode ser copiada permanece neste aparelho." (na troca: "Digite o novo código. Ele substitui o que está guardado neste aparelho."). Campo `<input type="password" class="campo" autocomplete="off" autocapitalize="none" spellcheck="false">` com label "Código", **fora de qualquer `<form>`** (Enter no campo aciona "Guardar neste aparelho" por script) e ajuda "22 letras e números, como xxxxxx-xxxx-xxxx-xxxx-xxxx. Hífens e espaços são ignorados." Colar funciona (nada de bloquear `paste`). Botão `.btn-leve` "Mostrar código" (`aria-pressed`). Botões "Guardar neste aparelho" (`.btn-primario`) e "Cancelar".
+**Etapa 1, pedir.** Texto: "Este aparelho ainda não pode mandar comandos ao seu computador. Ele vai criar uma chave própria, que não pode ser copiada nem sai daqui, e pedir autorização ao computador. Nada secreto é digitado nesta página." Campo `<input type="text" class="campo" maxlength="40" autocomplete="off" spellcheck="false">` com label "Nome deste aparelho" e ajuda "Aparece no computador na hora de autorizar. Por exemplo: celular do Moisés."; erro do campo em `role="alert"`. Botão `.btn-primario` "Pedir autorização" (Enter no campo também pede). Foco inicial no campo. O pedido reaproveita a chave guardada enquanto o computador não a conhece; se o computador conhece o `kid` e mesmo assim recusou a assinatura, o aparelho cria uma chave nova.
+
+**Etapa 2, aguardando autorização.** De cima para baixo: "Impressão digital deste aparelho:"; a impressão digital em letras grandes (`.impressao`); a instrução "No computador, rode `node scripts/configurar-comandos.js --pedidos`, confira se a impressão digital é esta e autorize com:"; o comando `node scripts/configurar-comandos.js --autorizar <kid> <impressão>` já preenchido, num `<pre class="entrada">` focável (`tabindex="0"`, `aria-label="Comando para autorizar este aparelho"`) para copiar; uma linha de status `role="status"` e o botão `.btn-leve` "Pedir de novo" (volta à etapa 1, para um pedido que passou de 1 h). Foco inicial no título. A linha de status começa com "Pedido enviado. Ele chega ao computador no próximo ciclo do coletor e vale por 1 hora.", depois passa a "Aguardando autorização no computador." e, quando o `kid` aparece em `orquestracao.aparelhos` (o dono autorizou), a "Aparelho autorizado. Já pode mandar comandos." Depois de "Pedido enviado" a frase só troca quando o computador autoriza, para o leitor de tela não repetir.
 
 | Estado | O que se vê |
 |---|---|
-| Primeira vez | como acima; foco no campo |
-| Código mal formado (depois da normalização não são 22 caracteres do alfabeto) | erro no campo: "O código tem 22 letras e números. Confira e tente de novo." Nada é derivado |
-| Derivando (PBKDF2 pode levar de 0,3 a 1,5 s no celular) | botão "Conferindo…" desabilitado, `aria-busy="true"` no diálogo |
-| Guardado | diálogo fecha; se veio de um comando, ele é enviado; senão o rodapé mostra "Código guardado neste aparelho." (`role="status"`) |
-| IndexedDB indisponível (navegação privada, bloqueio) | erro no diálogo: "Este navegador não deixou guardar o código. Saia do modo privado e tente de novo." Nada é enviado |
-| Código errado ou de aparelho desconhecido | o aparelho não tem como conferir na hora. O coletor recusa o comando com o motivo `assinatura` ou `aparelho` e a linha de andamento (item 6) oferece "Digitar o código de novo" |
-| Cancelar | fecha e o comando que o pedia não é enviado; a tela diz "Comando não enviado: falta o código do aparelho." |
+| Primeira vez | etapa 1; foco no campo |
+| Nome inválido (vazio, mais de 40 caracteres, quebra de linha ou caractere invisível) | erro no campo (`aria-invalid`), foco nele: "Escreva um nome de 1 a 40 caracteres para este aparelho, sem quebra de linha." Nada é criado nem enviado |
+| Sem criptografia (fora de https) | "Este navegador não oferece a criptografia que os comandos exigem. Abra o painel pelo endereço https e tente de novo." |
+| Pedindo | botão "Pedindo…" desabilitado, "Fechar" desabilitado, `aria-busy="true"` no diálogo |
+| Pedido enviado | etapa 2, com o status "Pedido enviado. …" e o foco no título |
+| IndexedDB indisponível (navegação privada, bloqueio) | "Este navegador não deixou guardar a chave do aparelho. Saia do modo privado e tente de novo." Nada é enviado |
+| Falha ao criar a chave | "Não foi possível criar a chave deste aparelho. Tente de novo." |
+| Erro do servidor | 429: "Há pedidos de autorização demais esperando o computador. Autorize os que são seus ou espere uma hora e tente de novo."; 400: "Não enviado: o pedido está inválido."; sem conexão: "Não enviado: sem conexão. Tente de novo."; outro: "Não enviado: erro ao falar com o painel." |
+| Autorizado no computador | status "Aparelho autorizado. Já pode mandar comandos."; o rodapé mostra o aparelho com o nome |
+| Comando pedido sem estar autorizado | o diálogo abre; o comando não é enviado ("Comando não enviado: este aparelho ainda não foi autorizado no computador.") |
+| Coletor recusou com `assinatura` ou `aparelho` | o botão "Autorizar este aparelho" aparece junto do motivo (item 6) |
+| Fechar | "Fechar" ou Esc fecham; o foco volta ao controle que abriu |
 
-**Rodapé "Este aparelho"** (`<section aria-labelledby>`, discreto, no fim da página, nas duas abas): `h2` pequeno "Este aparelho". Com chave: "Aparelho `<kid>`" seguido de " · <rótulo>" quando o `kid` está em `orquestracao.aparelhos` (por exemplo "Aparelho ab2cd3 · celular do Moisés"); se o `kid` não está na lista (e o retrato já trouxe `orquestracao`): "Aparelho `<kid>`. O computador não conhece este código; os comandos serão recusados. Digite o código de novo ou esqueça este aparelho." Botões `.btn-leve` "Trocar código" e "Esquecer este aparelho". Sem chave: "Este aparelho ainda não tem código." e `.btn` "Informar código". "Esquecer este aparelho" abre confirmação inline: "Este aparelho vai deixar de mandar comandos até você digitar o código de novo." e botões "Esquecer este aparelho" (`.btn-perigo`) e "Cancelar"; ao concluir: "Aparelho esquecido." (`role="status"`). **Sair do painel também esquece o aparelho** (chama `esquecer()`); com chave, o rodapé acrescenta: "Sair do painel também esquece este aparelho."
+**Rodapé "Este aparelho"** (`<section aria-labelledby>`, discreto, no fim da página, nas duas abas): `h2` pequeno "Este aparelho". Sem chave: "Este aparelho ainda não está autorizado a mandar comandos." e `.btn` "Autorizar este aparelho". Com chave autorizada (o `kid` está em `orquestracao.aparelhos`): "Aparelho `<kid>` · <nome>", por exemplo "Aparelho a1b2c3 · celular do Moisés". Com chave que o computador ainda não conhece (e o retrato já trouxe `orquestracao.aparelhos`): "Aparelho `<kid>`, aguardando autorização no computador. Impressão digital `<impressão>`." e o botão `.btn-leve` "Ver como autorizar" (abre a etapa 2). Com chave, o rodapé mostra também "Sair do painel também esquece este aparelho." e o botão `.btn-leve` "Esquecer este aparelho", que abre uma confirmação inline: "Este aparelho vai apagar a chave dele e deixar de mandar comandos. Para voltar, será preciso autorizá-lo de novo no computador." e botões "Esquecer este aparelho" (`.btn-perigo`) e "Cancelar" (Esc também cancela). Ao concluir, `role="status"`: "Aparelho esquecido. Para tirar a autorização dele no computador, rode node scripts/configurar-comandos.js --revogar `<kid>`." **Esquecer só apaga a chave no aparelho**: a autorização continua no computador até o dono rodar `--revogar <kid>`. **Sair do painel também esquece o aparelho** (chama `esquecer()`).
 
-**Onde a chave fica:** `CryptoKey` HMAC não extraível no IndexedDB (banco `moises`, armazém `chaves`, registro `comandos`), por `public/cofre.js`. Nada em `localStorage` nem `sessionStorage`. Quem conseguir rodar script no painel ainda poderia pedir assinaturas enquanto ele estiver aberto, mas não leva a chave embora (S1); a CSP e a ausência de `innerHTML` reduzem esse risco (S12).
+**Onde a chave fica:** `CryptoKey` ECDSA P-256 privada, não extraível, no IndexedDB (banco `moises`, armazém `chaves`, registro `comandos`), junto da chave pública e do `kid`, por `public/cofre.js`. Nada em `localStorage` nem `sessionStorage`. Quem conseguir rodar script no painel ainda poderia pedir assinaturas enquanto ele estiver aberto, mas não leva a chave embora (S1); a CSP e a ausência de `innerHTML` reduzem esse risco (S12), e o coletor desliga os comandos (`painel_alterado`) em até 10 min se o painel publicado for diferente do `public/` do computador (S15).
 
 ### 9. Coletor fora do ar e orquestração desligada
 
@@ -275,7 +285,8 @@ Conteúdo: título "Código do aparelho". Texto: "Este aparelho ainda não pode 
 
 - **Banner** `#banner-coletor` (`.banner`, `role="status"`), acima do botão Nova sessão: "O coletor está fora do ar desde 14:02. Você vê o último estado conhecido, mas não pode mandar comandos." Sem retrato nunca: "O coletor ainda não enviou dados. Sem ele não dá para mandar comandos."
 - **Botões**: todos os que enviam comando ficam `disabled` (padrão visual existente: opacidade 0,6). Como botão desabilitado não recebe foco, **o motivo é sempre texto visível**, em `.acao-estado` logo abaixo do grupo (uma vez por cartão, não por botão), ligado por `aria-describedby` a todos os controles do cartão (ações, "Enviar mensagem", Negar e Aprovar): "Comandos desligados: o coletor está fora do ar desde 14:02." Esse texto aparece **só nas ações**; mensagem e pedido de permissão não o repetem (D1).
-- **Orquestração desligada**: "Comandos desligados: a orquestração está desligada neste computador." (`orquestracao.ativa` falso ou ausente).
+- **Orquestração desligada**: "Comandos desligados: a orquestração está desligada neste computador." (`orquestracao.ativa` falso ou ausente, por `desligado` ou `painel_alterado`; o painel não distingue o motivo nesse caso). Com motivo `sem_chave`: "Comandos desligados: nenhum aparelho está autorizado neste computador. Use "Autorizar este aparelho", no fim da página."
+- **Navegador sem criptografia** (fora de https): "Comandos desligados: este navegador não oferece a criptografia que os comandos exigem (abra o painel por https)."
 - **Estado do cartão**: continua o último selo, mas `.meta` no topo do bloco novo diz "Estado de 14:02. Pode estar desatualizado."
 - **Comando já enviado** quando o coletor cai: a linha de andamento fica em "Enviado" e acrescenta, depois de 20 s, "O coletor está fora do ar. O pedido vale por 2 minutos e depois expira."
 - Quando o coletor volta, tudo se reabilita na consulta seguinte, sem recarregar a página.
@@ -284,9 +295,9 @@ Conteúdo: título "Código do aparelho". Texto: "Este aparelho ainda não pode 
 
 Tudo em pt-BR, direto em `app.js` e `index.html` como hoje (o projeto não tem arquivo de textos; sugestão: agrupar em um objeto `TEXTOS` no topo de `app.js`). Rótulos e mensagens estão nos itens acima; lista de conferência dos que não aparecem em tabela:
 
-- Botões: "Nova sessão", "Revisar", "Voltar e editar", "Abrir sessão", "Enviar mensagem", "Aprovar", "Negar", "Interromper", "Encerrar", "Encerrar e salvar log", "Retomar", "Retomar sessão", "Cancelar", "Fechar", "Mostrar tudo", "Mostrar menos", "Guardar neste aparelho", "Informar código", "Trocar código", "Esquecer este aparelho", "Mostrar código", "Digitar o código de novo".
-- Avisos fixos do bloco de permissão: "Atenção. Este pedido mexe com chaves, senhas ou configuração do Moisés ou do Claude Code. Aprove só se foi você quem pediu isso." e "Este pedido não coube inteiro no painel; só é possível negar."
-- Em andamento: "Enviando…", "Aprovando…", "Negando…", "Conferindo…" (derivando a chave do código).
+- Botões: "Nova sessão", "Revisar", "Voltar e editar", "Abrir sessão", "Enviar mensagem", "Aprovar", "Negar", "Interromper", "Encerrar", "Encerrar e salvar log", "Retomar", "Retomar sessão", "Cancelar", "Fechar", "Mostrar tudo", "Mostrar menos", "Autorizar este aparelho", "Pedir autorização", "Pedir de novo", "Ver como autorizar", "Esquecer este aparelho".
+- Avisos fixos do bloco de permissão: "Atenção. Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue." ("Atenção." em negrito) e "Este pedido não coube inteiro no painel; só é possível negar."
+- Em andamento: "Enviando…", "Aprovando…", "Negando…", "Pedindo…" (pedido de autorização do aparelho).
 - Região viva `#anuncios` (só leitor de tela): "<projeto>: pedindo permissão para usar <ferramenta>." / "<projeto>: esperando você." / "<projeto>: terminou o trabalho." (de `trabalhando` para `esperando_mensagem`) / "<projeto>: encerrada." Só quando o `estado` mudou entre duas consultas, nunca na primeira carga; várias mudanças na mesma consulta viram uma só frase separada por ponto.
 - Título da aba: com permissões pendentes, `document.title = "(2) Moisés · Sessões do Claude Code"`; volta ao normal sem pendências.
 
@@ -301,7 +312,7 @@ Tudo em pt-BR, direto em `app.js` e `index.html` como hoje (o projeto não tem a
 | Ações | matriz do item 5 | confirmação aberta / botão "Aguarde" | andamento `recusado`/`falhou` | n/a | com motivo escrito |
 | Andamento | passos e frase | `pendente`/`recebido` | `recusado`, `falhou`, `expirado` | oculto sem comando recente | n/a |
 | Nova sessão | formulário e resumo | "Enviando…" | campo e faixa | projetos vazio | item 7 |
-| Código | diálogo | "Conferindo…" | mal formado | n/a | n/a |
+| Autorizar aparelho | duas etapas (pedir; aguardando) | "Pedindo…" | nome inválido, 429, sem IndexedDB ou sem criptografia | n/a | n/a |
 
 ## Acessibilidade (WCAG 2.2 AA)
 
@@ -309,23 +320,23 @@ Tudo em pt-BR, direto em `app.js` e `index.html` como hoje (o projeto não tem a
 - **Cor nunca sozinha**: selo = texto + forma; passos do andamento = texto + ✓/✕; bloco de permissão = título e texto; erro = texto "Não …".
 - **Alvo de toque**: todos os botões, selects, rádios (linha inteira) e checkbox com 44 px de altura mínima; `gap` de 8 px entre botões; "Mostrar tudo" e botões `.btn-leve` também 44 px (já é a regra de `.btn`).
 - **Foco**: `:focus-visible` existente (3 px, `--foco`). `<pre class="entrada">` com `tabindex="0"` tem o mesmo anel. O cabeçalho sticky (`.abas`) já tem `scroll-padding-top: 76px`, então o foco não fica escondido atrás dele (WCAG 2.4.11).
-- **Diálogos**: `<dialog>` nativo com `showModal()` (preso o foco, Esc fecha, fundo inerte). Ordem de foco ao abrir: Nova sessão, primeiro campo ("Projeto"); resumo, título do resumo; código do aparelho, campo "Código". Ao fechar, o foco volta ao botão que abriu (ou, se ele sumiu, ao cabeçalho do cartão). `::backdrop` com `rgb(0 0 0 / 0.6)`, suficiente para isolar o conteúdo nos dois temas. Foco inicial das confirmações destrutivas em "Cancelar" (Interromper) ou no campo de nome (Encerrar, como hoje).
+- **Diálogos**: `<dialog>` nativo com `showModal()` (preso o foco, Esc fecha, fundo inerte). Ordem de foco ao abrir: Nova sessão, primeiro campo ("Projeto"); resumo, título do resumo; autorizar aparelho, campo "Nome deste aparelho" (etapa 1) ou título (etapa 2). Ao fechar, o foco volta ao botão que abriu (ou, se ele sumiu, ao cabeçalho do cartão). `::backdrop` com `rgb(0 0 0 / 0.6)`, suficiente para isolar o conteúdo nos dois temas. Foco inicial das confirmações destrutivas em "Cancelar" (Interromper) ou no campo de nome (Encerrar, como hoje).
 - **Regiões vivas**: uma `aria-live="polite"` global (`#anuncios`) para mudanças de estado, uma `role="status"` por linha de andamento (cada uma só é preenchida quando o comando muda de estado, para não repetir a cada consulta de 2 s) e `role="alert"` só para `recusado`, `falhou`, "não conferido" e erro de formulário. O selo de cada cartão **não** é região viva (seriam dezenas de anúncios). Nenhuma região viva é recriada a cada render: criar uma vez e trocar o texto.
-- **Rótulos**: todo campo com `<label for>`; ajuda e erro ligados com `aria-describedby`; grupo de rádios em `<fieldset><legend>`; botão de mostrar código com `aria-pressed`; "Mostrar tudo" com `aria-expanded`.
+- **Rótulos**: todo campo com `<label for>`; ajuda e erro ligados com `aria-describedby`; grupo de rádios em `<fieldset><legend>`; "Mostrar tudo" com `aria-expanded`.
 - **Semântica**: botões são `<button>`, formulários `<form>`, lista de passos `<ol>` (oculta ao leitor porque a frase já diz o mesmo), `<time datetime>` no horário. ARIA só onde não há elemento nativo.
 - **Movimento**: o pulso do selo e as reticências do andamento ficam dentro de `@media (prefers-reduced-motion: no-preference)`; a regra global que já zera animações continua valendo.
-- **Autenticação**: o campo do código aceita colar e gerenciador de senhas (WCAG 3.3.8); nenhuma prova cognitiva.
+- **Autenticação**: não há código nem segredo para digitar no aparelho; o comando de autorizar pode ser copiado e a impressão digital é conferida a olho (WCAG 3.3.8); nenhuma prova cognitiva.
 - **Zoom e texto grande**: textos em `rem`, `overflow-wrap: anywhere` em tudo que vem do coletor; nada com altura fixa em pixels exceto `max-height` com rolagem. Conferir a 320 px e com texto a 200%.
 
 ## O que o dev precisa implementar
 
-1. `index.html`: `<script type="module" src="/app.js">`; botão e linha de andamento de Nova sessão; `#banner-coletor`; `<dialog id="dlg-nova">` e `<dialog id="dlg-codigo">`; rodapé "Este aparelho"; `<div id="anuncios" class="so-leitor" aria-live="polite">`.
-2. `public/cofre.js` (novo): `guardar({kid, chave})`, `obter()`, `esquecer()` sobre o IndexedDB (banco `moises`, armazém `chaves`, registro `comandos`). `app.js` importa `./assinatura.js` e `./cofre.js`. `enviarComando(tipo, sessao, dados)`: se `obter()` não devolve chave, abre o diálogo do código e continua depois; acrescenta `visto: {projeto, nome}` da sessão exibida e, em `aprovar`, o `vistoHash` de `hashVisto(ferramenta, entrada)` sobre o texto exibido; assina, `POST /api/comando`, guarda o comando em `pendentesLocais`, acelera a consulta para 2 s enquanto houver `pendente` ou `recebido` (e volta a 15 s depois). Sair do painel chama `esquecer()`.
+1. `index.html`: `<script type="module" src="/app.js">`; botão e linha de andamento de Nova sessão; `#banner-coletor`; `<dialog id="dlg-nova">` e `<dialog id="dlg-aparelho">`; rodapé "Este aparelho"; `<div id="anuncios" class="so-leitor" aria-live="polite">`.
+2. `public/cofre.js` (novo): `guardar({kid, chave, publica})`, `obter()`, `esquecer()` sobre o IndexedDB (banco `moises`, armazém `chaves`, registro `comandos`). `app.js` importa `./assinatura.js` e `./cofre.js`. `enviarComando(tipo, sessao, dados)`: se `obter()` não devolve uma chave que o computador já autorizou (`orquestracao.aparelhos`), abre o diálogo "Autorizar este aparelho" e o comando não sai; acrescenta `visto: {projeto, nome}` da sessão exibida e, em `aprovar`, o `vistoHash` de `hashVisto(ferramenta, entrada)` sobre o texto exibido; assina, `POST /api/comando`, guarda o comando em `pendentesLocais`, acelera a consulta para 2 s enquanto houver `pendente` ou `recebido` (e volta a 15 s depois). Sair do painel chama `esquecer()`.
 3. Selo por `estado` com a tabela do item 1 e queda para `status`; contador no resumo; título da aba; anúncios.
 4. Detalhe do cartão na nova ordem, criado uma vez e atualizado no lugar (textarea e foco preservados); últimos 5 minutos do andamento; `comandoDe` continua escolhendo o comando mais novo por `chave`.
 5. Bloco de permissão com `completo` e `sensivel` e todos os estados do item 4 (sem segunda etapa de aprovar).
 6. Matriz de ações do item 5 (Retomar por `retomavel`), confirmações de Interromper, Encerrar (texto novo, rota nova) e Retomar. `POST /api/encerrar` some do código (a rota é removida na tarefa 4).
-7. Diálogo Nova sessão com validação, teto `maxSessoes` e resumo; diálogo do código; rodapé com `kid` e rótulo; mapa de `motivo` → texto (item 6).
+7. Diálogo Nova sessão com validação, teto `maxSessoes` e resumo; diálogo "Autorizar este aparelho" (duas etapas); rodapé com `kid` e nome; mapa de `motivo` → texto (item 6).
 8. `style.css`: token `--permissao-borda` nos dois temas; `.selo-permissao`; `.cartao[data-status="permissao"]`; `.resposta`, `.entrada`, `.permissao`, `.permissao-aviso`, `.andamento`, `.passos`, `.mensagem-form`, `.campo-area`, `.campo-erro`, `.dialogo` (e `::backdrop`), `.so-leitor`, `select.campo` (`appearance` nativa mantida, altura 44 px) e o rodapé. Nada de estilo inline: toda variação por classe ou atributo `data-`.
 9. **Nenhum `innerHTML`** (nem `insertAdjacentHTML`, `outerHTML`, `document.write`): todo elemento sai de `document.createElement` e `textContent`/`append`. A CSP passa a ter `require-trusted-types-for 'script'`; qualquer atribuição de string a um destino de HTML quebra a página. Atributos `href` nunca recebem conteúdo de sessão.
 
@@ -335,7 +346,7 @@ Tudo em pt-BR, direto em `app.js` e `index.html` como hoje (o projeto não tem a
 
 ## Roteiro de conferência manual (dev e QA)
 
-Não há simulador de coletor. O roteiro usa o painel local com um coletor de verdade apontado para ele: `PORT=3800 node scripts/dev.js` e, em outro terminal, o coletor local com as variáveis do painel local, uma pasta temporária de configuração (lista de projetos só com `~/moises-sandbox`, `soPrefixo: 'moises-teste-'`) e o código de um aparelho gerado para o teste. O lead roda este roteiro junto com o teste de ponta a ponta (`npm run e2e`). Tenha uma sessão de teste aberta (uma aberta pelo painel e uma aberta à mão num terminal). Abra `http://localhost:3800`, entre com a senha, use o DevTools em 375 e depois 1280 px, nos temas claro e escuro. Marque também 320 px.
+Não há simulador de coletor. O roteiro usa o painel local com um coletor de verdade apontado para ele: `PORT=3800 node scripts/dev.js` e, em outro terminal, o coletor local com as variáveis do painel local, uma pasta temporária de configuração (lista de projetos só com `~/moises-sandbox`, `soPrefixo: 'moises-teste-'`) e um aparelho autorizado para o teste (peça pelo painel e autorize com `--pedidos` e `--autorizar <kid> <impressão>`, com `MOISES_PASTA_CONF` e `MOISES_ESTADO` apontando para as pastas temporárias do teste). O lead roda este roteiro junto com o teste de ponta a ponta (`npm run e2e`). Tenha uma sessão de teste aberta (uma aberta pelo painel e uma aberta à mão num terminal). Abra `http://localhost:3800`, entre com a senha, use o DevTools em 375 e depois 1280 px, nos temas claro e escuro. Marque também 320 px.
 
 Passos marcados **[conferir no código]** dependem de estado difícil de provocar com um coletor real (relógio errado, pedido cortado, caractere invisível, ritmo, expiração). Para eles, leia o `app.js` e confirme que o ramo existe e que o texto bate com a spec; se quiser ver na tela, publique o retrato à mão pela API do painel local com o token do coletor.
 
@@ -343,16 +354,16 @@ Passos marcados **[conferir no código]** dependem de estado difícil de provoca
 2. Coletor com `MOISES_COMANDOS=0`: motivo "desligada neste computador" nos botões. Com lista de projetos vazia: "Nenhum projeto permitido".
 3. Sessões em estados diferentes (as que for possível provocar: `trabalhando`, `esperando_mensagem`, `esperando_permissao`, `encerrada`): conferir o selo (texto e forma) e a borda esquerda; só a de permissão em âmbar; resumo "1 esperando permissão"; título da aba "(1) …".
 4. Abrir cada cartão e comparar com a matriz do item 5, para comandada e não comandada. Encerrada: Retomar só aparece quando o retrato traz `retomavel: true`.
-5. Sessão comandada em `esperando_mensagem`: digitar uma mensagem, esperar 16 s (um ciclo de consulta) e confirmar que o texto e o foco continuam. Tocar "Enviar mensagem": o código do aparelho é pedido na primeira vez. Digitar o código de teste; a mensagem sai sozinha; ver Enviado → Recebido → Executado, texto limpo, foco no campo. Conferir no DevTools (Application → IndexedDB → `moises`) que há só `kid` e uma chave não extraível, e que `localStorage` não tem nada do código.
-6. Código de outro aparelho (um código válido que o computador não conhece): o coletor recusa com o motivo `aparelho`; ver o texto do motivo, o botão "Digitar o código de novo" e a mensagem devolvida à caixa.
+5. Sessão comandada em `esperando_mensagem`: digitar uma mensagem, esperar 16 s (um ciclo de consulta) e confirmar que o texto e o foco continuam. Tocar "Enviar mensagem" com o aparelho ainda não autorizado: abre "Autorizar este aparelho" e a mensagem não sai. Pedir autorização, conferir a impressão digital no terminal (`--pedidos`), autorizar com o comando mostrado e ver o status mudar para "Aparelho autorizado. Já pode mandar comandos."; tocar "Enviar mensagem" de novo e ver Enviado → Recebido → Executado, texto limpo, foco no campo. Conferir no DevTools (Application → IndexedDB → `moises`) que há `kid`, a chave pública e uma chave privada não extraível, e que `localStorage` não tem nada disso.
+6. Aparelho revogado (`--revogar <kid>`) logo antes de tocar o botão, com o retrato ainda antigo: o coletor recusa com o motivo `aparelho`; ver o texto do motivo, o botão "Autorizar este aparelho" e a mensagem devolvida à caixa. Se o retrato já foi atualizado, o painel nem envia e abre o diálogo.
 7. Pedido de permissão com entrada de várias linhas: ver ferramenta, entrada em monoespaçada com as quebras preservadas, "N linhas" acima e sem rolagem própria; Negar e Aprovar com andamento. Pedido `sensivel` (por exemplo, ler um arquivo de `~/.config/moises`): o aviso aparece antes dos botões e só há Negar. **[conferir no código]** `completo: false`: só Negar, com o texto "Este pedido não coube inteiro no painel; só é possível negar."; entrada com caractere invisível: aparece como `\u{XXXX}`.
 8. Dois pedidos na mesma sessão: dois blocos, cada um responde sozinho.
 9. Interromper: confirmação com foco em Cancelar; confirmar e ver o andamento. Encerrar: confirmação com nome, aviso de sessão comandada e de não comandada; ver "Encerrada. Log salvo no Histórico." e o item no Histórico.
 10. Sessão encerrada de projeto da lista (`retomavel: true`): Retomar com seus campos; de projeto fora da lista: só a linha explicativa.
-11. Motivos de recusa. Fáceis de provocar: `aparelho` (passo 6), `desligado` (passo 2) e `verbo`/`formato` pela API. **[conferir no código]**: `relogio`, `expirado`, `repetido`, `ritmo`, `sem_chave`, `interno`, `falhou` e `expirado` no servidor (um texto por motivo no mapa do item 6; `recusado` e `falhou` com `role="alert"`).
+11. Motivos de recusa. Fáceis de provocar: `desligado` (passo 2), `painel_alterado` (rode o coletor com um `public/` diferente do painel que ele confere) e `verbo`/`formato` pela API. `aparelho` depende do passo 6. **[conferir no código]**: `relogio`, `expirado`, `repetido`, `ritmo`, `sem_chave`, `interno`, `falhou` e `expirado` no servidor (um texto por motivo no mapa do item 6; `painel_alterado` mostra o `erro` do coletor; `recusado` e `falhou` com `role="alert"`).
 12. Derrubar o coletor por mais de 2 min: banner, botões desabilitados com motivo e "Estado de HH:MM". Religar: tudo volta sem recarregar.
 13. Nova sessão: tentar "Revisar" vazio (erros e foco no primeiro inválido); preencher; ver a linha de ajuda sobre sessão isolada no formulário e no resumo, o modo "Perguntar antes de agir" já marcado; "Voltar e editar" preserva valores; "Abrir sessão" fecha, foco no botão, andamento do "abrir" aparece. Com `abertas >= maxSessoes` (suba `maxSessoes` para 1 no coletor de teste e abra uma), botão desabilitado com motivo.
-14. Rodapé: "Este aparelho" mostra o `kid` e o rótulo; "Esquecer este aparelho" remove a chave (IndexedDB vazio) e o próximo comando pede o código; "Sair" também esquece.
+14. Rodapé: "Este aparelho" mostra o `kid` e o nome (ou "aguardando autorização no computador" com a impressão digital, antes de autorizar); "Esquecer este aparelho" remove a chave (IndexedDB vazio), diz como revogar no computador e o próximo comando pede autorização de novo; "Sair" também esquece.
 15. Só com teclado: Tab pelo cartão, diálogos presos no foco, Esc fecha, foco volta ao ponto de origem, Ctrl+Enter envia a mensagem.
 16. Leitor de tela (VoiceOver ou TalkBack): chegada de pedido anuncia "<projeto>: pedindo permissão para usar Bash."; andamento anuncia cada mudança uma vez.
 17. `prefers-reduced-motion: reduce` (DevTools, Rendering): sem pulso nem reticências animadas.
@@ -363,7 +374,7 @@ Passos marcados **[conferir no código]** dependem de estado difícil de provoca
 
 1. **Enviar mensagem durante `trabalhando`.** Decisão confirmada pelo dono: continua desabilitado. Fica registrada aqui só para não ser reaberta sem motivo.
 2. **Aviso de pedido `sensivel`.** A redação do item 4 é minha; vale uma leitura do `seguranca` para ver se o tom (aviso forte, sem botão vermelho) é o certo.
-3. **Aparelho guardado que não está em `orquestracao.aparelhos`** (código revogado no computador). A spec só avisa no rodapé; o coletor recusa os comandos com o motivo `aparelho`. Se o dono preferir que o painel esqueça a chave sozinho nesse caso, é uma linha a mais no `app.js`.
+3. **Aparelho guardado que não está em `orquestracao.aparelhos`** (revogado no computador, ou ainda não autorizado). O rodapé mostra "aguardando autorização no computador" com a impressão digital e o painel não envia comandos (abre o diálogo). O painel não esquece a chave sozinho; se o dono preferir isso, é uma linha a mais no `app.js`.
 
 ## Erro de sessão que morreu sozinha
 

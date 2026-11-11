@@ -70,16 +70,19 @@ Grupos para trabalho em paralelo (arquivos disjuntos): **G2** = tarefa 2; **G3**
 
 ## Contrato comum
 
-**Código do aparelho** (gerado na máquina, digitado uma vez no aparelho): `<kid>-<4>-<4>-<4>-<4>`, com `kid` de 6 caracteres e quatro grupos de 4, todos do alfabeto `abcdefghjkmnpqrstuvwxyz23456789` (sorteio com `crypto.randomInt`). Normalização antes de derivar: minúsculas e só `[a-z0-9]`; os 6 primeiros caracteres normalizados são o `kid`; o código normalizado tem de ter 22 caracteres.
+**Chave do aparelho** (revisto na tarefa 15; a versão original usava um código digitado, ver `ACHADOS.md`, A1): cada aparelho gera no navegador um par ECDSA P-256, com a chave privada **não extraível** (uso `sign`, guardada no IndexedDB) e a pública exportada em `raw` (65 bytes, `0x04 || x || y`) em base64url sem `=` (87 caracteres). Nada secreto é digitado na página.
 
-**Chave:** PBKDF2-SHA256 do código normalizado inteiro, sal `moises-comandos-v1`, 210.000 iterações, 32 bytes, usada como chave HMAC-SHA256. No navegador é um `CryptoKey` **não extraível** com uso `sign`.
+- **`kid`:** os 6 primeiros hexadecimais do SHA-256 da chave pública `raw` (`/^[0-9a-f]{6}$/`).
+- **Impressão digital:** os 16 primeiros hexadecimais do mesmo SHA-256, em 4 grupos de 4 (`a1b2-c3d4-e5f6-0718`). É o que o dono confere entre o aparelho e o computador.
+- **Autorização:** o aparelho manda `{kid, publica, rotulo}` em `POST /api/aparelho`; o coletor leva o pedido ao computador e o dono o autoriza com `node scripts/configurar-comandos.js --autorizar <kid> <impressão>`, que grava `{rotulo, publica, criadaEm}` em `chaves-comandos.json` (600) só se a impressão digital for a do pedido.
+- **Assinatura:** ECDSA SHA-256 no formato IEEE P1363 (`r || s`, 64 bytes), em base64url sem `=`: 86 caracteres. O coletor confere com `crypto.verify('sha256', texto, { key, dsaEncoding: 'ieee-p1363' }, assinatura)` e recusa base64url não canônico.
 
 **Comando** (o que o navegador envia e o coletor recebe):
 
 ```json
 { "v": 1, "kid": "ab2cd3", "id": "c_0123456789abcdef", "tipo": "mensagem", "chave": "principal:<uuid>",
   "criadoEm": 1794387000000, "dados": "{\"texto\":\"...\",\"visto\":{\"projeto\":\"x\",\"nome\":\"y\"}}",
-  "assinatura": "<43 caracteres base64url>" }
+  "assinatura": "<86 caracteres base64url>" }
 ```
 
 | Campo | Regra (conferida no servidor e, de novo, no coletor antes da assinatura) |
@@ -91,9 +94,9 @@ Grupos para trabalho em paralelo (arquivos disjuntos): **G2** = tarefa 2; **G3**
 | `chave` | `null` em `abrir`; nos outros, `/^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/` |
 | `criadoEm` | inteiro seguro, relógio do navegador |
 | `dados` | **string** JSON de até 8.000 caracteres |
-| `assinatura` | `/^[A-Za-z0-9_-]{43}$/` |
+| `assinatura` | `/^[A-Za-z0-9_-]{86}$/` (revisto na tarefa 15; era HMAC de 43) |
 
-**Texto assinado:** `JSON.stringify(['moises-cmd-v1', kid, id, tipo, chave ?? '', criadoEm, dados])`, HMAC-SHA256, base64url sem `=`.
+**Texto assinado:** `JSON.stringify(['moises-cmd-v1', kid, id, tipo, chave ?? '', criadoEm, dados])`, assinado com ECDSA P-256 (revisto na tarefa 15; era HMAC-SHA256), base64url sem `=`.
 
 **Dados por verbo** (depois do `JSON.parse` da mesma string que foi verificada; o coletor copia só os campos da tabela e recusa campo fora dela):
 
@@ -427,6 +430,6 @@ Depois das tarefas 11 a 14. **Arquivos:** `public/assinatura.js`, `public/cofre.
 - **Chave do aparelho.** O navegador gera um par ECDSA P-256 com a chave privada **não extraível** (`generateKey(..., false, ['sign'])`) e exporta só a pública (`raw`, 65 bytes, base64url). `impressao` = os 16 primeiros hexadecimais do SHA-256 da pública, em 4 grupos de 4 (`a1b2-c3d4-e5f6-0718`); `kid` = os 6 primeiros hexadecimais. Nada é digitado na página.
 - **Assinatura.** ECDSA SHA-256 no formato IEEE P1363 (64 bytes) em base64url sem `=`: `/^[A-Za-z0-9_-]{86}$/`. O texto assinado não muda. O coletor confere com `crypto.verify('sha256', texto, { key, dsaEncoding: 'ieee-p1363' }, assinatura)` e recusa base64url não canônico.
 - **Pedido de pareamento.** `POST /api/aparelho` (cookie e JSON) com `{kid, publica, rotulo}` (`rotulo` de 1 a 40 caracteres, sem controle). O servidor guarda em `moises:aparelhos-pedidos` (no máximo 5; cada um vale 1 h) e o ingest os entrega ao coletor (`aparelhosPedidos`), que os grava em `<pastaEstado>/aparelhos-pedidos.json` (600) sem confiar neles.
-- **Autorizar no computador.** `node scripts/configurar-comandos.js --pedidos` lista `kid`, rótulo, impressão digital e horário; `--autorizar <kid>` grava `{rotulo, publica, criadaEm}` em `chaves-comandos.json` (600) e avisa se já existe aparelho com o mesmo rótulo; `--listar` e `--revogar <kid>` continuam. Não existe mais código nem `codigo-<kid>.txt`.
-- **Painel.** O diálogo do código vira "Autorizar este aparelho": rótulo, botão "Pedir autorização", a impressão digital em letras grandes e a instrução "No computador, rode `node scripts/configurar-comandos.js --pedidos`, confira se a impressão digital é esta e autorize com `--autorizar <kid>`.". O aparelho fica "aguardando autorização" até o `kid` aparecer em `orquestracao.aparelhos`. "Esquecer este aparelho" apaga a chave; um aparelho esquecido só volta com nova autorização no computador.
+- **Autorizar no computador.** `node scripts/configurar-comandos.js --pedidos` lista `kid`, rótulo, impressão digital e horário; `--autorizar <kid> <impressão>` (a impressão digital é exigida, para fechar a troca entre conferir e autorizar) grava `{rotulo, publica, criadaEm}` em `chaves-comandos.json` (600) e avisa se já existe aparelho com o mesmo rótulo; `--listar` e `--revogar <kid>` continuam. Não existe mais código nem `codigo-<kid>.txt`.
+- **Painel.** O diálogo do código vira "Autorizar este aparelho": rótulo, botão "Pedir autorização", a impressão digital em letras grandes e a instrução "No computador, rode `node scripts/configurar-comandos.js --pedidos`, confira se a impressão digital é esta e autorize com `--autorizar <kid> <impressão>`.". O aparelho fica "aguardando autorização" até o `kid` aparecer em `orquestracao.aparelhos`. "Esquecer este aparelho" apaga a chave; um aparelho esquecido só volta com nova autorização no computador.
 - **Testes.** Os da assinatura passam a usar o par de chaves; o porteiro recusa assinatura HMAC antiga e chave pública inválida; o script não autoriza `kid` inexistente nem chave pública fora do formato; o e2e gera o par por `public/assinatura.js` e grava a pública em `chaves-comandos.json` como o script faria.
