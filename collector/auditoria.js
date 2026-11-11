@@ -64,6 +64,19 @@ export class Auditoria {
     }
   }
 
+  // Grava já a linha de resumo das recusas suprimidas no minuto corrente, sem esperar a virada
+  // (o coletor chama ao parar). Sem nada suprimido, não grava nada. Nunca lança.
+  descarregar() {
+    try {
+      if (this.suprimidas <= 0) return;
+      const em = new Date(this.agora()).toISOString();
+      this.#escrever({ em, decisao: 'recusado', motivo: 'suprimidas', resultado: `${this.suprimidas} recusas` });
+      this.suprimidas = 0;
+    } catch (err) {
+      console.error(`auditoria: não foi possível gravar o registro (${err?.code || 'erro'}).`);
+    }
+  }
+
   // Acrescenta a linha; se ela fizer o arquivo passar de maxBytes, o atual vira <arquivo>.1
   // (substituindo o anterior) e a linha abre um arquivo novo. Os dois ficam com permissão 600.
   #escrever(obj) {

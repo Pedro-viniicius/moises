@@ -10,7 +10,9 @@ Environment=PATH=%h/.nvm/versions/node/v22.23.0/bin:%h/.local/bin:/usr/local/bin
 Restart=always
 RestartSec=10
 Nice=10
-MemoryHigh=400M
+# As sessões comandadas pelo painel (processos `claude`) rodam no mesmo grupo do serviço: por isso 4G.
+# Reiniciar ou parar o serviço encerra as sessões comandadas (elas ficam retomáveis pelo painel).
+MemoryHigh=4G
 NoNewPrivileges=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

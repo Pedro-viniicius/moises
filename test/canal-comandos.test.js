@@ -730,3 +730,82 @@ test('o conjunto de vistos é podado por tempo, nunca por contagem', (t) => {
   fs.writeFileSync(arq, '{quebrado');
   assert.doesNotThrow(() => m.novoPorteiro());
 });
+
+test('descarregar grava na hora o resumo das recusas suprimidas', (t) => {
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const arq = path.join(raiz, 'auditoria.jsonl');
+  const aud = new Auditoria({ arquivo: arq, agora: () => T0 + 5_000, maxRecusasPorMinuto: 2 });
+  const linhas = () => fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  for (let i = 0; i < 6; i++) aud.registrar({ id: `c_${i}`, decisao: 'recusado', motivo: 'assinatura' });
+  assert.equal(linhas().length, 2);
+  // Sem esperar a virada do minuto (é o que parar() faz ao encerrar o coletor).
+  aud.descarregar();
+  assert.deepEqual(linhas().at(-1), { em: new Date(T0 + 5_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '4 recusas' });
+  // Chamar de novo sem nada suprimido não grava outra linha, e o resumo não sai duas vezes.
+  aud.descarregar();
+  aud.registrar({ id: 'c_ok', decisao: 'aceito' });
+  assert.equal(linhas().length, 4);
+  assert.equal(linhas().filter((l) => l.motivo === 'suprimidas').length, 1);
+  // Nunca lança, nem sem conseguir gravar (o "arquivo" é uma pasta).
+  t.mock.method(console, 'error', () => {});
+  const quebrada = new Auditoria({ arquivo: raiz, agora: () => T0, maxRecusasPorMinuto: 0 });
+  quebrada.registrar({ id: 'c_1', decisao: 'recusado', motivo: 'formato' });
+  assert.doesNotThrow(() => quebrada.descarregar());
+});
+
+test('arquivo de vistos corrompido: recusa com interno o comando criado antes do reinício', (t) => {
+  const avisos = t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  const antigo = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(antigo)), 'aceito');
+  const arq = path.join(m.estado, 'comandos-vistos.json');
+  fs.writeFileSync(arq, '{quebrado');
+  // O serviço reinicia 5 s depois: o comando antigo ainda está na validade, mas o registro dele se perdeu.
+  m.relogio.agora = T0 + 5_000;
+  const reiniciado = m.novoPorteiro();
+  const r = reiniciado.conferir(antigo);
+  assert.deepEqual([r.ok, r.motivo], [false, 'interno']);
+  assert.equal(r.erro, 'Erro interno do coletor; o comando não foi executado.');
+  // Qualquer comando criado antes da construção também, mesmo um que nunca foi visto.
+  assert.equal(motivo(reiniciado.conferir(m.comando({ criadoEm: T0 + 4_999 }))), 'interno');
+  // Um comando novo passa e regrava o arquivo; o antigo continua recusado.
+  m.relogio.agora = T0 + 6_000;
+  const novo = m.comando();
+  assert.equal(motivo(reiniciado.conferir(novo)), 'aceito');
+  assert.ok(novo.id in vistosEm(m.estado));
+  assert.equal(motivo(reiniciado.conferir(antigo)), 'interno');
+  // JSON válido que não é objeto também conta como corrompido.
+  fs.writeFileSync(arq, '[1,2]');
+  m.relogio.agora = T0 + 7_000;
+  assert.equal(motivo(m.novoPorteiro().conferir(m.comando({ criadoEm: T0 + 6_500 }))), 'interno');
+  const texto = avisos.mock.calls.map((c) => c.arguments.map(String).join(' ')).join('\n');
+  assert.ok(!texto.includes('quebrado'));
+});
+
+test('arquivo de vistos ilegível: recusa com interno o comando criado antes do reinício', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignora a permissão do arquivo');
+  t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  const antigo = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(antigo)), 'aceito');
+  const arq = path.join(m.estado, 'comandos-vistos.json');
+  fs.chmodSync(arq, 0o000);
+  m.relogio.agora = T0 + 5_000;
+  let reiniciado;
+  try {
+    reiniciado = m.novoPorteiro();
+  } finally {
+    fs.chmodSync(arq, 0o600);
+  }
+  assert.equal(motivo(reiniciado.conferir(antigo)), 'interno');
+  assert.equal(motivo(reiniciado.conferir(m.comando())), 'aceito');
+});
+
+test('arquivo de vistos ausente continua sendo começo limpo', (t) => {
+  const m = montar(t);
+  m.relogio.agora = T0 + 5_000;
+  const p = m.novoPorteiro();
+  // Criado antes da construção, mas sem arquivo nenhum: não há registro perdido.
+  assert.equal(motivo(p.conferir(m.comando({ criadoEm: T0 }))), 'aceito');
+});

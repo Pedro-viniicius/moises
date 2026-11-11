@@ -306,6 +306,45 @@ test('ideias: falha tenta de novo depois do intervalo, sem a sessão precisar mu
   assert.equal(chamadas, 2);
 });
 
+test('ideias: tarefa vinda do primeiro pedido não entra no prompt; vai o nome da sessão', async () => {
+  const PEDIDO = 'texto do pedido que nao pode alimentar as ideias';
+  let agora = 1_000_000_000;
+  const perguntas = [];
+  const id = new Ideias({
+    pastaEstado: tmp(),
+    agora: () => agora,
+    chamar: async (pergunta) => (perguntas.push(pergunta), { texto: '{"complexidade":"mecanica","ideias":["a","b"],"motivo":"m"}', custo: 0 }),
+  });
+  const sessao = (extra) => ({ chave: 'k', status: 'ativa', projeto: 'p', tarefa: PEDIDO, tarefaOrigem: 'pedido', nome: 'refatorar login', resumo: null, modelo: 'claude-opus-5-5', esforco: 'high', ...extra });
+  id.aplicar({ sessoes: [sessao()] });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(perguntas.length, 1);
+  assert.match(perguntas[0], /- tarefa atual: refatorar login\n/);
+  assert.ok(!perguntas[0].includes(PEDIDO));
+  // O pedido mudar não conta como mudança relevante (a assinatura usa o mesmo texto do prompt).
+  agora += 11 * 60_000;
+  id.aplicar({ sessoes: [sessao({ tarefa: `${PEDIDO} outro` })] });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(perguntas.length, 1);
+  // Sem nome e sem resumo, a sessão nem vira alvo: o pedido sozinho não basta.
+  id.aplicar({ sessoes: [sessao({ chave: 'k2', nome: null })] });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(perguntas.length, 1);
+  // Título ou resumo continuam indo como tarefa.
+  id.aplicar({ sessoes: [sessao({ chave: 'k3', tarefa: 'título da IA', tarefaOrigem: 'titulo' })] });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(perguntas.length, 2);
+  assert.match(perguntas[1], /- tarefa atual: título da IA\n/);
+});
+
+test('ideias: o teto diário vem do construtor', async () => {
+  let chamadas = 0;
+  const id = new Ideias({ pastaEstado: tmp(), tetoDia: 0, chamar: async () => (chamadas++, { erro: 'x' }) });
+  id.aplicar({ sessoes: [{ chave: 'k', status: 'ativa', projeto: 'p', tarefa: 't', modelo: 'claude-opus-5-5', esforco: 'high' }] });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(chamadas, 0);
+});
+
 test('R1: resposta copiada entre sessões (retomada) conta uma vez, na sessão de origem', async () => {
   const raiz = tmp();
   const dir = path.join(raiz, '.claude');

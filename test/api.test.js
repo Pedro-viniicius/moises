@@ -358,6 +358,35 @@ test('com o coletor parado, o próximo comando expira os vencidos e eles não co
   }
 });
 
+test('estado marca como expirado o pendente vencido mesmo com o coletor parado', async () => {
+  const cookie = await entrar();
+  const vencido = cmdValido();
+  await chamar(comando, { method: 'POST', body: vencido, headers: { cookie } });
+  const novo = await comRelogio(119_000, async () => {
+    const c = cmdValido();
+    await chamar(comando, { method: 'POST', body: c, headers: { cookie } });
+    return c;
+  });
+  // Nenhum ingest: o coletor está parado. Só o painel consulta o estado.
+  await comRelogio(121_000, async () => {
+    const e = await chamar(estado, { headers: { cookie } });
+    assert.equal(e.statusCode, 200);
+    const porId = Object.fromEntries(e.body.comandos.map((c) => [c.id, c]));
+    assert.equal(porId[vencido.id].estado, 'expirado');
+    assert.equal(porId[novo.id].estado, 'pendente');
+  });
+  const g = guardado(vencido.id);
+  assert.equal(g.estado, 'expirado');
+  assert.equal('dados' in g, false);
+  assert.equal('assinatura' in g, false);
+  assert.ok(!redisFalso.db.get('moises:cmds').get(vencido.id).includes(MARCA));
+  // O que ainda está na validade continua inteiro para o coletor.
+  assert.equal(guardado(novo.id).dados, novo.dados);
+  // Se o coletor confirmar depois, o resultado dele prevalece, como no ingest.
+  await chamar(ingest, { method: 'POST', body: { acks: [{ id: vencido.id, estado: 'feito' }] }, headers: coletor });
+  assert.equal(guardado(vencido.id).estado, 'feito');
+});
+
 test('ack feito de abrir grava a chave nova', async () => {
   const cookie = await entrar();
   const novaChave = 'conta2:0f0e0d0c-0b0a-4908-8706-050403020100';

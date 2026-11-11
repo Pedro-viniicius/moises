@@ -258,6 +258,9 @@ export class Porteiro {
     this.arqVistos = path.join(pastaEstado, ARQ_VISTOS);
     this.vistos = new Map(); // id → criadoEm
     this.recentes = []; // instantes dos comandos válidos que entraram no teto por minuto
+    // Instante da construção quando o arquivo de vistos existia mas não pôde ser lido: sem ele não há
+    // como saber se um comando criado antes disso já rodou, e todos esses são recusados (falha fechada).
+    this.recusarAntesDe = null;
     this.#lerVistos();
   }
 
@@ -294,6 +297,8 @@ export class Porteiro {
         this.#gravarVistos(agora);
         return recusa('relogio');
       }
+      // Registro de vistos perdido no início (PLANO, tarefa 7): o que foi criado antes pode já ter rodado.
+      if (this.recusarAntesDe !== null && c.criadoEm < this.recusarAntesDe) return recusa('interno');
       if (this.vistos.has(c.id)) return recusa('repetido');
       // A partir daqui o id está queimado, seja qual for a decisão.
       this.vistos.set(c.id, c.criadoEm);
@@ -352,7 +357,10 @@ export class Porteiro {
     try {
       bruto = fs.readFileSync(this.arqVistos, 'utf8');
     } catch (err) {
-      if (err?.code !== 'ENOENT') console.error(`porteiro: não foi possível ler os comandos vistos (${err?.code || 'erro'}).`);
+      // Arquivo ausente é começo limpo; qualquer outra falha de leitura fecha a porta para o que veio antes.
+      if (err?.code === 'ENOENT') return;
+      this.recusarAntesDe = this.agora();
+      console.error(`porteiro: não foi possível ler os comandos vistos (${err?.code || 'erro'}); comandos anteriores a este início serão recusados.`);
       return;
     }
     let json;
@@ -362,7 +370,8 @@ export class Porteiro {
       json = null;
     }
     if (!objetoSimples(json)) {
-      console.error('porteiro: o arquivo de comandos vistos é inválido; começando vazio.');
+      this.recusarAntesDe = this.agora();
+      console.error('porteiro: o arquivo de comandos vistos é inválido; comandos anteriores a este início serão recusados.');
       return;
     }
     for (const [id, criadoEm] of Object.entries(json)) {
