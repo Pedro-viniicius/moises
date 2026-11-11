@@ -185,8 +185,8 @@ export class Coletor {
         resumo: redigir(p?.resumo, 280),
         status: statusDe(reg, !!viv?.vivo, agora),
         tipo: reg.kind || null,
-        iniciadaEm: reg.startedAt || p?.primeiraAtividade || null,
-        ultimaAtividade: ultima,
+        iniciadaEm: horario(reg.startedAt, agora) || horario(p?.primeiraAtividade, agora),
+        ultimaAtividade: horario(ultima, agora),
         modelo: p?.modelo || null,
         esforco: p?.esforco || null,
         custo: arred(totalSessao.custo * fator),
@@ -221,6 +221,9 @@ export function fatorOficial(est, meu) {
   const r = of.total / meu;
   return cobreTudo && r > 1 && r < 1.5 ? r : 1;
 }
+
+// Horário plausível em ms (descarta lixo como nanossegundos ou datas no futuro).
+const horario = (v, agora) => (Number.isFinite(v) && v > 1e12 && v < agora + 86_400_000 ? v : null);
 
 const arred = (v) => Math.round(v * 10000) / 10000;
 function arredModelos(pm) {

@@ -24,8 +24,9 @@ function el(tag, classe, texto) {
 /* ---------- Formatação ---------- */
 
 const moeda = (v) => fmtMoeda.format(Number.isFinite(v) ? v : 0);
-const hora = (ms) => fmtHora.format(new Date(ms));
-const dataHora = (ms) => fmtDataHora.format(new Date(ms)).replace(',', '');
+const dataValida = (ms) => Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());
+const hora = (ms) => (dataValida(ms) ? fmtHora.format(new Date(ms)) : '—');
+const dataHora = (ms) => (dataValida(ms) ? fmtDataHora.format(new Date(ms)).replace(',', '') : '—');
 
 function tempoRel(ms) {
   const min = Math.max(0, Math.floor((Date.now() - ms) / 60000));
@@ -172,7 +173,14 @@ function comandoDe(chave) {
     if (c.chave === chave && (!achado || c.criadoEm > achado.criadoEm)) achado = c;
   }
   const local = estado.pendentesLocais.get(chave);
-  if (local && (!achado || achado.criadoEm < local.criadoEm)) achado = local;
+  if (!local) return achado;
+  // Quando o servidor já devolve o mesmo pedido, vale o estado dele (pendente → feito/falhou).
+  const doServidor = lista.find((c) => c.id === local.id);
+  if (doServidor) {
+    estado.pendentesLocais.delete(chave);
+    return doServidor;
+  }
+  if (!achado || achado.criadoEm < local.criadoEm) achado = local;
   return achado;
 }
 
@@ -451,7 +459,12 @@ function renderLista() {
   $('carregando').hidden = true;
 
   const todas = (d.retrato && d.retrato.sessoes) || [];
-  const visiveis = estado.filtro === 'abertas' ? todas.filter((s) => s.status !== 'encerrada') : todas;
+  // Uma sessão encerrada pelo painel fica 5 min em "Abertas" para mostrar o resultado do pedido.
+  const recemEncerrada = (s) => {
+    const c = comandoDe(s.chave);
+    return !!c && Date.now() - c.criadoEm < 5 * 60_000;
+  };
+  const visiveis = estado.filtro === 'abertas' ? todas.filter((s) => s.status !== 'encerrada' || recemEncerrada(s)) : todas;
   const ativo = document.activeElement;
 
   const vivos = new Set(visiveis.map((s) => s.chave));
@@ -502,7 +515,12 @@ async function carregarEstado() {
     if (!r.ok || !r.dados) throw new Error('resposta inválida');
     estado.dados = r.dados;
     $('banner-rede').hidden = true;
-    renderTudo();
+    // Erro ao desenhar não é falta de conexão: registra e mantém o que já está na tela.
+    try {
+      renderTudo();
+    } catch (erroTela) {
+      console.error('[painel] erro ao desenhar', erroTela);
+    }
   } catch (e) {
     if (e instanceof NaoAutorizado) return;
     $('banner-rede').hidden = false;
