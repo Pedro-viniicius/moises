@@ -75,6 +75,15 @@ function cmdValido(extra = {}) {
   };
 }
 const guardado = (id) => JSON.parse(redisFalso.db.get('moises:cmds').get(id));
+// Rodada de correção 2 (R9): o resultado de cada etapa fica em moises:cmds-rec e moises:cmds-fim, gravados
+// uma vez só; o objeto em moises:cmds guarda o comando e pendente/expirado. Estado no Redis, pela regra:
+// fim, senão recebido, senão o do objeto.
+function estadoGuardado(id) {
+  const fim = redisFalso.db.get('moises:cmds-fim')?.get(id);
+  if (fim) return JSON.parse(fim).estado;
+  if (redisFalso.db.get('moises:cmds-rec')?.has(id)) return 'recebido';
+  return guardado(id).estado;
+}
 function comRelogio(deslocamentoMs, fn) {
   const real = Date.now;
   Date.now = () => real() + deslocamentoMs;
@@ -205,6 +214,9 @@ test('comando recusa formato inválido', async () => {
     'v texto': cmdValido({ v: '1' }),
     'kid maiúsculo': cmdValido({ kid: 'AB2CD3' }),
     'kid curto': cmdValido({ kid: 'ab2cd' }),
+    // Rodada de correção 2 (SE-B3): o kid é hexadecimal, como no coletor e em /api/aparelho.
+    'kid fora do hexadecimal': cmdValido({ kid: 'zz9zz9' }),
+    'kid com letra depois do f': cmdValido({ kid: 'ab2cg3' }),
     'kid ausente': sem('kid'),
     'id sem prefixo': cmdValido({ id: 'x_0123456789abcdef' }),
     'id curto': cmdValido({ id: 'c_0123' }),
@@ -321,7 +333,7 @@ test('ack recebido apaga dados e assinatura do Redis', async () => {
   assert.equal(guardado(c.id).dados, c.dados);
   await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
   const g = guardado(c.id);
-  assert.equal(g.estado, 'recebido');
+  assert.equal(estadoGuardado(c.id), 'recebido');
   assert.equal('dados' in g, false);
   assert.equal('assinatura' in g, false);
   assert.ok(!redisFalso.db.get('moises:cmds').get(c.id).includes(MARCA));
@@ -349,7 +361,8 @@ test('comando expirado perde dados e assinatura', async () => {
   assert.equal(e.body.comandos[0].estado, 'expirado');
   // se o coletor pegou o comando pouco antes de expirar, o resultado dele prevalece
   await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'feito' }] }, headers: coletor });
-  assert.equal(guardado(c.id).estado, 'feito');
+  assert.equal(estadoGuardado(c.id), 'feito');
+  assert.equal((await chamar(estado, { headers: { cookie } })).body.comandos[0].estado, 'feito');
 });
 
 test('com o coletor parado, o próximo comando expira os vencidos e eles não contam no limite', async () => {
@@ -397,7 +410,7 @@ test('estado marca como expirado o pendente vencido mesmo com o coletor parado',
   assert.equal(guardado(novo.id).dados, novo.dados);
   // Se o coletor confirmar depois, o resultado dele prevalece, como no ingest.
   await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: vencido.id, estado: 'feito' }] }, headers: coletor });
-  assert.equal(guardado(vencido.id).estado, 'feito');
+  assert.equal(estadoGuardado(vencido.id), 'feito');
 });
 
 test('ack feito de abrir grava a chave nova', async () => {
@@ -447,7 +460,7 @@ test('ack recusado guarda o erro e o motivo, e motivo fora do formato é descart
   const d = cmdValido();
   await chamar(comando, { method: 'POST', body: d, headers: { cookie } });
   await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: d.id, estado: 'apagado' }] }, headers: coletor });
-  assert.equal(guardado(d.id).estado, 'pendente');
+  assert.equal(estadoGuardado(d.id), 'pendente');
 });
 
 test('comando recebido há 10 min sem resultado vira falhou', async () => {
@@ -457,7 +470,7 @@ test('comando recebido há 10 min sem resultado vira falhou', async () => {
   await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
   await comRelogio(590_000, () => chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor }));
-  assert.equal(guardado(c.id).estado, 'recebido');
+  assert.equal(estadoGuardado(c.id), 'recebido');
   await comRelogio(601_000, () => chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor }));
   const e = await chamar(estado, { headers: { cookie } });
   assert.equal(e.body.comandos[0].estado, 'falhou');
@@ -524,7 +537,7 @@ test('o ingest só entrega comandos ao coletor que anuncia protocolo 2', async (
     assert.equal(r.statusCode, 200);
     assert.deepEqual(r.body.comandos, [], `protocolo ${protocolo}`);
   }
-  assert.equal(guardado(c.id).estado, 'pendente');
+  assert.equal(estadoGuardado(c.id), 'pendente');
   assert.equal(guardado(c.id).dados, c.dados, 'o comando continua guardado para o coletor novo');
   const novo = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   assert.deepEqual(novo.body.comandos.map((x) => x.id), [c.id]);
@@ -533,7 +546,8 @@ test('o ingest só entrega comandos ao coletor que anuncia protocolo 2', async (
 test('POST /api/comando só aceita aparelho anunciado pelo coletor', async () => {
   const cookie = await entrar();
   // Aparelho que o coletor não anunciou: 403, nada gravado.
-  const estranho = await chamar(comando, { method: 'POST', body: cmdValido({ kid: 'zz9zz9' }), headers: { cookie } });
+  // Rodada de correção 2 (SE-B3): kid hexadecimal, no formato que passa, mas de aparelho não anunciado.
+  const estranho = await chamar(comando, { method: 'POST', body: cmdValido({ kid: 'ff9ff9' }), headers: { cookie } });
   assert.equal(estranho.statusCode, 403);
   assert.equal(estranho.body.erro, 'Este aparelho não está autorizado neste computador.');
   assert.equal(redisFalso.db.get('moises:cmds'), undefined);

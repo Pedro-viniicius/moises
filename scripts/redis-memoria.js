@@ -29,7 +29,8 @@ export function instalarRedisFalso() {
       case 'HSET': h(a[0]).set(a[1], a[2]); return 1;
       case 'HSETNX': if (h(a[0]).has(a[1])) return 0; h(a[0]).set(a[1], a[2]); return 1;
       case 'HGET': return db.get(a[0])?.get(a[1]) ?? null;
-      case 'HDEL': return db.get(a[0])?.delete(a[1]) ? 1 : 0;
+      // Como no Redis, HDEL aceita vários campos e devolve quantos existiam.
+      case 'HDEL': return a.slice(1).filter((campo) => db.get(a[0])?.delete(campo)).length;
       case 'HGETALL': return [...(db.get(a[0]) || new Map())].flat();
       default: throw new Error(`comando não simulado: ${cmd}`);
     }
@@ -40,7 +41,15 @@ export function instalarRedisFalso() {
   globalThis.fetch = async (url, opts) => {
     if (!String(url).startsWith('https://redis.memoria')) return fetchReal(url, opts);
     const corpo = JSON.parse(opts.body);
-    const res = String(url).endsWith('/pipeline') ? corpo.map((c) => ({ result: exec(c) })) : { result: exec(corpo) };
+    // Como no Upstash: o pipeline não para no comando que falha (não é atômico); o erro vai na posição dele.
+    const um = (c) => {
+      try {
+        return { result: exec(c) };
+      } catch (err) {
+        return { error: err.message };
+      }
+    };
+    const res = String(url).endsWith('/pipeline') ? corpo.map(um) : um(corpo);
     return { json: async () => res };
   };
   return {

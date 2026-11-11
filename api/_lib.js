@@ -5,6 +5,9 @@ export const K = {
   retrato: 'moises:retrato',
   recebidoEm: 'moises:recebidoEm',
   cmds: 'moises:cmds',
+  // Resultado de cada etapa do comando, gravado uma vez só (HSETNX): o estado só avança (R9, S20).
+  cmdsRec: 'moises:cmds-rec',
+  cmdsFim: 'moises:cmds-fim',
   logs: 'moises:logs',
   painelVistoEm: 'moises:painelVistoEm',
   aparelhosPedidos: 'moises:aparelhos-pedidos',
@@ -19,7 +22,8 @@ export const EXPIRA_CMD_MS = 120_000;
 // O servidor só transporta: confere formato, nunca a assinatura (a chave fica no aparelho e no coletor).
 export const TIPOS_CMD = ['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar'];
 export const RE_CHAVE = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export const RE_KID = /^[a-z0-9]{6}$/;
+// Os 6 primeiros hexadecimais do SHA-256 da chave pública, como o coletor e /api/aparelho conferem (SE-B3).
+export const RE_KID = /^[0-9a-f]{6}$/;
 // ECDSA P-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15). A assinatura HMAC do código do
 // aparelho (43 caracteres) não passa daqui.
 export const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
@@ -57,12 +61,85 @@ export function esquecerConteudo(c) {
   delete c.assinatura;
 }
 
-// Marca como expirado o pendente que passou da validade. Devolve true se mudou.
-export function expirarSeVencido(c, agora) {
-  if (c.estado !== 'pendente' || agora - chegadaDoComando(c) < EXPIRA_CMD_MS) return false;
-  c.estado = 'expirado';
+// Única regravação do objeto de moises:cmds depois de criado (o HSETNX de /api/comando é a única gravação
+// com conteúdo): sempre sem dados nem assinatura. Assim um escritor atrasado, que leu o comando antes de
+// outro esquecer o conteúdo, não consegue devolvê-lo ao Redis.
+export function gravarSemConteudo(c) {
   esquecerConteudo(c);
-  return true;
+  return ['HSET', K.cmds, c.id, JSON.stringify(c)];
+}
+
+// Apaga o comando e o resultado das etapas dele (limpeza depois de 24 h).
+export const apagarComando = (id) => [
+  ['HDEL', K.cmds, id],
+  ['HDEL', K.cmdsRec, id],
+  ['HDEL', K.cmdsFim, id],
+];
+
+// ---------- Estado do comando: só anda para a frente ----------
+// pendente/expirado → recebido → feito | falhou | recusado. O expirado aceita o resultado porque o coletor
+// pode ter recebido o comando pouco antes de o servidor expirá-lo.
+export const ORDEM_ESTADO = { pendente: 0, expirado: 0, recebido: 1, feito: 2, falhou: 2, recusado: 2 };
+const FINAIS = ['feito', 'falhou', 'recusado'];
+
+// O estado mostrado junta três registros (R9, S20):
+// - moises:cmds: o comando como o aparelho mandou, com `estado` pendente ou expirado (e, nos registros
+//   gravados antes das chaves abaixo existirem, o estado que o ingest gravava no próprio objeto);
+// - moises:cmds-rec: a hora em que o coletor confirmou o recebimento;
+// - moises:cmds-fim: o resultado final, JSON {estado, erro, motivo, feitoEm, chaveNova?}.
+// Os dois últimos são gravados com HSETNX: o primeiro vale e ninguém os desfaz. Vale o fim se existir;
+// senão o recebido (mesmo que o objeto diga expirado); senão o estado do objeto.
+export function juntarComando(c, rec, fim) {
+  const v = { ...c };
+  let f = null;
+  try {
+    f = typeof fim === 'string' ? JSON.parse(fim) : null;
+  } catch {
+    /* fim ilegível: só nós gravamos, com JSON.stringify; fica como se não existisse */
+  }
+  if (f && typeof f === 'object' && FINAIS.includes(f.estado)) {
+    v.estado = f.estado;
+    v.erro = typeof f.erro === 'string' ? f.erro : null;
+    v.motivo = typeof f.motivo === 'string' ? f.motivo : null;
+    v.feitoEm = f.feitoEm;
+    if (c.tipo === 'abrir' && typeof f.chaveNova === 'string' && RE_CHAVE.test(f.chaveNova)) v.chave = f.chaveNova;
+  } else if (typeof rec === 'string' && !FINAIS.includes(c.estado)) {
+    v.estado = 'recebido';
+    v.erro = null;
+    v.motivo = null;
+    // Hora ilegível conta como antiga: o comando vira falhou pelo tempo limite em vez de ficar parado.
+    v.recebidoPeloColetorEm = Number.isFinite(Number(rec)) ? Number(rec) : 0;
+  }
+  return v;
+}
+
+// Resultado de HGETALL → Map campo → valor (Map, para um id como __proto__ não virar protótipo).
+function hashParaMapa(arr) {
+  const m = new Map();
+  for (let i = 0; arr && i < arr.length; i += 2) m.set(arr[i], arr[i + 1]);
+  return m;
+}
+
+// Lê os três hashes (resultado de HGETALL de cmds, cmds-rec e cmds-fim). Devolve, por comando, o objeto
+// guardado (para regravar sem conteúdo) e a vista juntada (o estado que vale), mais os mapas rec e fim.
+export function lerComandos(cmdsArr, recArr, fimArr) {
+  const rec = hashParaMapa(recArr);
+  const fim = hashParaMapa(fimArr);
+  const itens = hashParaObjetos(cmdsArr)
+    .filter((c) => c !== null && typeof c === 'object' && typeof c.id === 'string')
+    .map((guardado) => ({ guardado, vista: juntarComando(guardado, rec.get(guardado.id) ?? null, fim.get(guardado.id) ?? null) }));
+  return { itens, rec, fim };
+}
+
+// Pendente que passou da validade vira expirado e perde dados e assinatura. Devolve a gravação, ou null.
+// Se o coletor confirmar ao mesmo tempo, cmds-rec ou cmds-fim prevalecem sobre este expirado.
+export function expirarSeVencido(item, agora) {
+  const { guardado, vista } = item;
+  if (vista.estado !== 'pendente' || agora - chegadaDoComando(guardado) < EXPIRA_CMD_MS) return null;
+  vista.estado = 'expirado';
+  esquecerConteudo(vista);
+  guardado.estado = 'expirado';
+  return gravarSemConteudo(guardado);
 }
 
 // ---------- Redis ----------

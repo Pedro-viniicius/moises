@@ -87,11 +87,11 @@ Corpo `{"senha": "..."}`.
     - `tarefa` e `tarefaOrigem`: a `tarefa` vem do título, do resumo, do primeiro pedido ou do nome da sessão, nesta ordem; `tarefaOrigem` diz de qual (`titulo`, `resumo`, `pedido`, `nome`) ou é `null` se não houver nenhum.
     - `gerenciada`: a sessão foi aberta ou retomada pelo painel e é conduzida pelo coletor (só ela aceita `mensagem`, `permissao` e `interromper`).
     - `retomavel`: está `encerrada` e a pasta dela está na lista de projetos do coletor (aceita `retomar`).
-    - `permissoes`: pedidos de permissão pendentes, `{pedido, ferramenta, entrada, completo, sensivel, criadoEm}`; lista vazia se não houver. `entrada` é o texto mascarado (até 4.000 caracteres, quebras de linha preservadas, caracteres invisíveis trocados por `\u{…}`) e vem vazia com `MOISES_SUBIR_TEXTO=0`. `completo` é falso se o pedido foi cortado, mascarado ou escapado, ou se o nome da ferramenta é estranho: nesse caso só dá para negar. `sensivel` marca pedido que menciona arquivos do Moisés, SSH, variáveis de ambiente, configurações do Claude, hooks do git ou credenciais.
+    - `permissoes`: pedidos de permissão pendentes, `{pedido, ferramenta, entrada, completo, sensivel, criadoEm}`; lista vazia se não houver. `entrada` é o texto mascarado (até 4.000 caracteres, quebras de linha preservadas, caracteres invisíveis trocados por `\u{…}`) e vem vazia com `MOISES_SUBIR_TEXTO=0`. `completo` é falso se o pedido foi cortado, mascarado ou escapado, ou se o nome da ferramenta é estranho: nesse caso só dá para negar. `sensivel` marca pedido que menciona arquivos do Moisés (inclusive a pasta do coletor e as pastas de chaves, projetos e estado), SSH, o systemd do usuário, variáveis de ambiente, configurações do Claude, hooks do git ou credenciais, ou comando `Bash` com letra fora de ASCII ou jeito de ofuscar (`$(`, crase, `eval`, `base64`, `/proc/`, `environ`, interpretador com `-c`/`-e`); é heurística: só dá para negar pelo painel.
     - `erro`: texto curto (mascarado) quando uma sessão comandada terminou sozinha com falha; fica no retrato por 10 min. `null` nas demais.
   - No topo do retrato, `orquestracao`: `ativa` (falso se o coletor não tem aparelho autorizado, está com `MOISES_COMANDOS=0` ou achou o painel publicado diferente do `public/` do computador) e `motivo` (`sem_chave`, `desligado`, `painel_alterado` ou `null`); `projetos`, `contas`, `modelos`, `esforcos` e `modos` são as listas que `abrir` aceita; `maxSessoes` e `abertas` são o teto e o número de sessões comandadas vivas; `aparelhos` lista `kid` e `rotulo` dos aparelhos autorizados no computador (só os de chave pública; aparelho do formato antigo não aparece). O servidor só aceita comando de um `kid` desta lista (ver `POST /api/comando`).
 - `recebidoEm` é quando o servidor recebeu o último envio do coletor. Se tiver mais de 2 min, o coletor está parado.
-- Cada chamada confere os comandos: o `pendente` com 2 min ou mais desde a chegada ao servidor vira `expirado` na hora (o painel não espera o coletor) e **perde `dados` e `assinatura`** no Redis.
+- Cada chamada confere os comandos: o `pendente` com 2 min ou mais desde a chegada ao servidor vira `expirado` na hora (o painel não espera o coletor) e **perde `dados` e `assinatura`** no Redis. Se o coletor confirmar o comando ao mesmo tempo, a confirmação prevalece sobre o `expirado` (ver "Comandos no Redis").
 - `comandos` vem do mais recente para o mais antigo. Nunca traz `dados` nem `assinatura`. `estado` segue `pendente` → `recebido` → `feito` | `falhou`, ou `pendente` → `recusado` | `expirado`. `erro` (até 200 caracteres) vem em `falhou` e `recusado`; `motivo` só em `recusado`, quando o coletor informa um motivo válido (`/^[a-z_]{1,20}$/`). Os que o coletor usa: `assinatura` e `aparelho` (a chave não confere ou o aparelho não está autorizado: pedem nova autorização do aparelho), `expirado`, `relogio` (relógio do aparelho **adiantado** ou **atrasado**: o `erro` diz qual; os dois pedem para acertar a hora), `repetido`, `ritmo`, `desligado`, `sem_chave`, `formato`, `verbo`, `interno` e `painel_alterado` (o painel publicado não é igual ao `public/` do computador; os comandos ficam desligados até a próxima conferência, a cada 10 min). `criadoEm` é o relógio do aparelho que assinou.
 - A chamada grava `moises:painelVistoEm` com a hora do servidor, **no máximo a cada 30 s** (se o valor guardado tem menos de 30 s, não é regravado; no futuro ou que não é número, é); o coletor recebe esse valor no `ingest` e acelera o envio quando ele tem menos de 60 s.
 
@@ -107,7 +107,7 @@ Transporta um comando assinado no aparelho. O servidor não tem a chave e **não
 | Campo | Regra |
 |---|---|
 | `v` | número `1` |
-| `kid` | `/^[a-z0-9]{6}$/` |
+| `kid` | `/^[0-9a-f]{6}$/` (os 6 primeiros hexadecimais do SHA-256 da chave pública, como em `POST /api/aparelho`) |
 | `id` | `/^c_[0-9a-f]{16}$/`, gerado pelo aparelho |
 | `tipo` | `abrir`, `mensagem`, `permissao`, `interromper`, `encerrar` ou `retomar` |
 | `chave` | `null` em `abrir`; nos outros, `/^[a-z0-9]{1,20}:<uuid em minúsculas>$/` |
@@ -173,9 +173,24 @@ Corpo `{"protocolo": 2, "retrato": {...} | null, "acks": [...]}` → `200 {"coma
 - `aparelhosPedidos`: os pedidos de autorização de aparelho de `POST /api/aparelho` ainda dentro de 1 h, do mais antigo para o mais novo. O coletor confere cada um de novo (o servidor não é confiável) e grava os válidos, no máximo 5, em `aparelhos-pedidos.json` (600) na pasta de estado, para `--pedidos` listar. Os pedidos vencidos são apagados do Redis nesta chamada.
 - Ack: `{"id", "estado": "recebido" | "feito" | "falhou" | "recusado", "erro", "motivo", "log", "chaveNova"}`. Por compatibilidade, também `{"id", "ok", "erro", "log"}` (`ok: true` vale `feito`; `false`, `falhou`).
   - Qualquer ack de um comando conhecido apaga `dados` e `assinatura` do Redis; a expiração também.
-  - O estado só anda para a frente (ack atrasado não desfaz `feito`); um comando `expirado` ainda aceita o ack do coletor.
+  - O estado só anda para a frente (ack atrasado não desfaz `feito`), mesmo com duas chamadas ao mesmo tempo (ver "Comandos no Redis"); um comando `expirado` ainda aceita o ack do coletor.
   - `erro` é cortado em 200 caracteres. `motivo` só é guardado se casar com `/^[a-z_]{1,20}$/`.
   - `chaveNova` (formato de `chave`) vira a `chave` do comando quando o `tipo` é `abrir`.
   - `recebido` há mais de 10 min sem outro ack vira `falhou` com o erro "O coletor não confirmou o resultado.".
-  - Comando que já terminou (ou expirou) é apagado do Redis depois de 24 h, na chamada do coletor.
-  - O log do Histórico só é gravado em `feito` de `encerrar` com `log`; dele só entram os campos listados em `GET /api/logs`.
+  - Comando que já terminou (ou expirou) é apagado do Redis depois de 24 h, na chamada do coletor, junto com o recebido e o resultado dele.
+  - O log do Histórico só é gravado em `feito` de `encerrar` com `log`, e uma vez só: um `feito` repetido não desfaz o nome editado em `PATCH /api/logs`. Dele só entram os campos listados em `GET /api/logs`.
+
+## Comandos no Redis
+O coletor pode reenviar um `ingest` (desistiu por tempo limite) enquanto o primeiro ainda roda, e o painel pode expirar um comando enquanto o coletor o confirma. Para o estado **só avançar**, cada etapa é gravada uma vez, de forma atômica, numa chave própria, e nenhuma gravação desfaz outra:
+
+| Chave (hash, campo = `id`) | Valor | Gravado por |
+|---|---|---|
+| `moises:cmds` | o comando como o aparelho mandou, com `estado` `pendente` ou `expirado` e `recebidoNoServidorEm` | `POST /api/comando` (`HSETNX`); depois só é regravado **sem** `dados` e `assinatura` (ack ou expiração) |
+| `moises:cmds-rec` | hora (ms) em que o coletor confirmou o recebimento | `HSETNX` no primeiro ack `recebido` |
+| `moises:cmds-fim` | JSON `{estado, erro, motivo, feitoEm, chaveNova?}`, `estado` `feito`, `falhou` ou `recusado` | `HSETNX` no primeiro ack final, ou no `falhou` de "O coletor não confirmou o resultado." |
+
+- Estado mostrado: o de `moises:cmds-fim` se existir; senão `recebido` se existir `moises:cmds-rec` (mesmo que o objeto diga `expirado`); senão o do objeto (`pendente` ou `expirado`). O primeiro resultado final vale: se o `feito` do coletor e o `falhou` do tempo limite chegarem juntos, fica o que gravou primeiro.
+- Só é entregue ao coletor como pendente o comando sem `moises:cmds-rec` e sem `moises:cmds-fim`, e `POST /api/comando` só conta esses no limite de 20 (e dá `409` para um `id` que já tem registro em qualquer das três chaves).
+- Uma chamada atrasada que leu o comando ainda com o conteúdo não consegue devolvê-lo: toda regravação do objeto tira `dados` e `assinatura`.
+- Compatibilidade: comandos gravados antes destas chaves (o estado ficava no próprio objeto) continuam aparecendo com o estado do objeto e ainda aceitam o resultado do coletor.
+- Registro em `moises:cmds-rec` ou `moises:cmds-fim` que sobrou sem comando é apagado depois de 24 h.

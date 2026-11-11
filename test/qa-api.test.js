@@ -53,6 +53,14 @@ const cmdValido = (extra = {}) => ({
   dados: JSON.stringify({ texto: MARCA, visto: { projeto: 'p', nome: null } }), assinatura: ASSINATURA, ...extra,
 });
 const guardado = (id) => JSON.parse(redisFalso.db.get('moises:cmds').get(id));
+// Rodada de correção 2 (R9): o resultado de cada etapa fica em moises:cmds-rec e moises:cmds-fim (gravados
+// uma vez só). Estado no Redis, pela regra: fim, senão recebido, senão o do objeto em moises:cmds.
+function estadoGuardado(id) {
+  const fim = redisFalso.db.get('moises:cmds-fim')?.get(id);
+  if (fim) return JSON.parse(fim).estado;
+  if (redisFalso.db.get('moises:cmds-rec')?.has(id)) return 'recebido';
+  return guardado(id).estado;
+}
 const enviar = async (cookie, c) => (await chamar(comando, { method: 'POST', body: c, headers: { cookie } })).statusCode;
 const acks = (lista) => chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: lista }, headers: coletor });
 const porId = async (cookie) => Object.fromEntries((await chamar(estado, { headers: { cookie } })).body.comandos.map((c) => [c.id, c]));
@@ -80,7 +88,7 @@ test('CA4: qualquer ack (recebido, feito, falhou, recusado, formato antigo) apag
   await acks(grupos.map(([a], i) => ({ id: cmds[i].id, ...a })));
   grupos.forEach(([, esperado], i) => {
     const g = guardado(cmds[i].id);
-    assert.equal(g.estado, esperado, `ack ${i}`);
+    assert.equal(estadoGuardado(cmds[i].id), esperado, `ack ${i}`);
     assert.equal('dados' in g, false);
     assert.equal('assinatura' in g, false);
     assert.ok(!redisFalso.db.get('moises:cmds').get(cmds[i].id).includes(MARCA));
@@ -135,7 +143,7 @@ test('CA9: um id de comando já concluído não pode ser enviado de novo (409), 
   await acks([{ id: c.id, estado: 'feito' }]);
   assert.equal(await enviar(cookie, c), 409);
   assert.equal(await enviar(cookie, { ...c, dados: JSON.stringify({ texto: 'outro', visto: { projeto: 'p', nome: null } }) }), 409);
-  assert.equal(guardado(c.id).estado, 'feito');
+  assert.equal(estadoGuardado(c.id), 'feito');
 });
 
 test('o log do Histórico só nasce de encerrar que terminou feito', async () => {

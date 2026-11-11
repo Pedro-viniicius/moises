@@ -7,7 +7,7 @@ import {
   exigeJson,
   lerCorpo,
   pipeline,
-  hashParaObjetos,
+  lerComandos,
   expirarSeVencido,
   K,
   TIPOS_CMD,
@@ -69,19 +69,28 @@ export default rota(['POST'], async (req, res) => {
   if (invalido) return json(res, 400, { erro: `Comando inválido (${invalido}).` });
 
   const agora = Date.now();
-  const [retrato, cmdsArr] = await pipeline([['GET', K.retrato], ['HGETALL', K.cmds]]);
+  const [retrato, cmdsArr, recArr, fimArr] = await pipeline([
+    ['GET', K.retrato],
+    ['HGETALL', K.cmds],
+    ['HGETALL', K.cmdsRec],
+    ['HGETALL', K.cmdsFim],
+  ]);
   // Só aparelho que o coletor anunciou: quem tem só o cookie não enche a fila com comandos que o
   // coletor recusaria (A4). Quem decide de verdade continua sendo o coletor, pela assinatura.
   const aparelhos = retrato ? aparelhosAnunciados(retrato) : null;
   if (!aparelhos) return json(res, 503, { erro: 'O coletor ainda não mandou o estado deste computador. Tente de novo em instantes.' });
   if (!aparelhos.includes(corpo.kid)) return json(res, 403, { erro: 'Este aparelho não está autorizado neste computador.' });
-  const cmds = hashParaObjetos(cmdsArr);
-  if (cmds.some((c) => c.id === corpo.id)) return json(res, 409, { erro: 'Esse comando já foi enviado.' });
+  const { itens, rec, fim } = lerComandos(cmdsArr, recArr, fimArr);
+  // Um resultado que sobrou com este id faria o comando novo nascer recebido ou feito: também é repetido.
+  if (itens.some((i) => i.guardado.id === corpo.id) || rec.has(corpo.id) || fim.has(corpo.id)) return json(res, 409, { erro: 'Esse comando já foi enviado.' });
   // Com o coletor parado ninguém expira os pendentes: expira aqui também, para não guardar o conteúdo
-  // além da validade e para os vencidos não ocuparem vaga.
+  // além da validade e para os vencidos não ocuparem vaga. Pendente é o que não tem cmds-rec nem cmds-fim.
   const muda = [];
-  for (const c of cmds) if (expirarSeVencido(c, agora)) muda.push(['HSET', K.cmds, c.id, JSON.stringify(c)]);
-  const pendentes = cmds.filter((c) => c.estado === 'pendente').length;
+  for (const item of itens) {
+    const gravar = expirarSeVencido(item, agora);
+    if (gravar) muda.push(gravar);
+  }
+  const pendentes = itens.filter((i) => i.vista.estado === 'pendente').length;
   if (pendentes >= MAX_PENDENTES) {
     await pipeline(muda);
     return json(res, 429, { erro: 'Há comandos demais esperando o coletor. Aguarde e tente de novo.' });
