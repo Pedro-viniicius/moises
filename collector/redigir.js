@@ -1,7 +1,7 @@
 // Nada que pareça segredo sai da máquina. Aplicado a todo texto livre enviado ao site.
 const PADROES = [
   /\b[a-z][a-z0-9+.-]*:\/\/[^\s:\/@]+:[^\s@]+@\S*/gi, // URL com usuário:senha
-  /[\w-]*(secret|token|senha|password|passwd|pwd|api[_-]?key)\w*\s*[:=]\s*\S+/gi, // chave=valor (inclui client_secret=, access_token=)
+  /[\w-]{0,40}(secret|token|senha|password|passwd|pwd|api[_-]?key)\w{0,20}\s{0,5}[:=]\s{0,5}\S+/gi, // chave=valor (inclui client_secret=, access_token=)
   /\bsenha\s+(é|eh|era|:)\s*\S+/gi, // "a senha é X"
   /\bBearer\s+\S+/gi,
   /\bAIza[0-9A-Za-z_-]{30,}/g, // Google
@@ -22,7 +22,8 @@ const PADROES = [
 
 export function redigir(texto, max = 200) {
   if (texto == null) return null;
-  let s = String(texto).replace(/\s+/g, ' ').trim();
+  // Corta antes das regex: texto enorme não pode travar o coletor.
+  let s = String(texto).slice(0, Math.max(4 * max, 1000)).replace(/\s+/g, ' ').trim();
   for (const re of PADROES) s = s.replace(re, '[oculto]');
   if (s.length > max) s = s.slice(0, max - 1).trimEnd() + '…';
   return s || null;

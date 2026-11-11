@@ -1,4 +1,5 @@
 import { test, after } from 'node:test';
+process.env.MOISES_LIMITES_ARQ = path.join(os.tmpdir(), `moises-limites-${process.pid}.json`);
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -369,4 +370,38 @@ test('coletor só envia para https (ou servidor local)', () => {
   assert.equal(urlAceita('http://localhost:3800'), true);
   assert.equal(urlAceita('http://moises-iota.vercel.app'), false);
   assert.equal(urlAceita('lixo'), false);
+});
+
+test('R1 no log: encerrar a sessão retomada não leva o custo copiado da origem', async (t) => {
+  const raiz = tmp();
+  const bin = path.join(raiz, 'claude');
+  fs.symlinkSync(process.execPath, bin);
+  const filho = spawn(bin, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  t.after(() => filho.kill('SIGKILL'));
+  await new Promise((r) => setTimeout(r, 200));
+  const antiga = new Date(Date.now() - 3600_000).toISOString();
+  const comum = resposta({ id: 'o1', req: 'o1', ts: antiga });
+  const dir = path.join(raiz, '.claude');
+  const proj = path.join(dir, 'projects', '-home-x-Documentos-projeto-a');
+  fs.mkdirSync(proj, { recursive: true });
+  fs.mkdirSync(path.join(dir, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(proj, 'origem2.jsonl'), comum);
+  await new Promise((r) => setTimeout(r, 30));
+  fs.writeFileSync(path.join(proj, 'copia2.jsonl'), comum + resposta({ id: 'c1', req: 'c1' }));
+  fs.writeFileSync(
+    path.join(dir, 'sessions', `${filho.pid}.json`),
+    JSON.stringify({ pid: filho.pid, sessionId: 'copia2', cwd: '/home/x/Documentos/projeto-a', procStart: inicioDoProcesso(filho.pid), status: 'busy', updatedAt: Date.now() }),
+  );
+  const c = new Coletor({ dirs: [dir] });
+  const r = await executarEncerrar(c, { id: 'cp1', chave: 'principal:copia2', idadeMs: 0 });
+  assert.equal(r.ok, true, r.erro);
+  assert.ok(Math.abs(r.log.custo - 0.024) < 1e-9, `log ${r.log.custo}`);
+});
+
+test('redigir não trava com texto enorme e repetitivo', () => {
+  const t0 = Date.now();
+  redigir('secret'.repeat(2000), 280);
+  redigir('a'.repeat(40000), 280);
+  redigir('x-'.repeat(20000) + 'token', 280);
+  assert.ok(Date.now() - t0 < 500, `levou ${Date.now() - t0} ms`);
 });

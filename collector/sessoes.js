@@ -215,14 +215,7 @@ export class Coletor {
     for (const [k, v] of vivos) if (v.vivo) chaves.add(k);
     for (const [k, info] of this.indice) if (info.mtime >= inicioHoje) chaves.add(k);
 
-    // A resposta fica com a sessão de origem: processa da mais antiga para a mais nova.
-    const ordem = [...chaves].map((k) => {
-      const info = this.indice.get(k);
-      const p = info ? this.lerSessao(info).principal : null;
-      return { k, inicio: p?.primeiraAtividade ?? Infinity, nascido: info?.nascido ?? Infinity };
-    });
-    // Empate (a retomada copia as respostas com os horários originais): vale o arquivo criado antes.
-    ordem.sort((a, b) => a.inicio - b.inicio || a.nascido - b.nascido);
+    const ordem = this.ordenar(chaves);
 
     const vistas = new Set();
     const sessoes = [];
@@ -255,7 +248,20 @@ export class Coletor {
     };
   }
 
-  // Uma sessão específica, mesmo sem atividade hoje (para o log ao encerrar).
+  // A resposta fica com a sessão de origem: ordena da mais antiga para a mais nova.
+  // Empate (a retomada copia as respostas com os horários originais): vale o arquivo criado antes.
+  ordenar(chaves) {
+    const ordem = [...chaves].map((k) => {
+      const info = this.indice.get(k);
+      const p = info ? this.lerSessao(info).principal : null;
+      return { k, inicio: p?.primeiraAtividade ?? Infinity, nascido: info?.nascido ?? Infinity };
+    });
+    return ordem.sort((a, b) => a.inicio - b.inicio || a.nascido - b.nascido);
+  }
+
+  // Uma sessão específica, mesmo sem atividade hoje (para o log ao encerrar),
+  // descontando as respostas que pertencem a sessões de origem mais antigas.
+  // (A origem só é reconhecida se estiver na janela das últimas 26 h.)
   sessaoDe(chavePainel) {
     const sep = chavePainel.indexOf(':');
     const conta = chavePainel.slice(0, sep);
@@ -265,7 +271,16 @@ export class Coletor {
     const agora = this.agora();
     if (agora - this.indiceEm > 60_000 || !this.indice.has(`${dir}|${id}`)) this.reindexar();
     const k = `${dir}|${id}`;
-    return this.montar(k, this.registros().get(k), agora, diaLocal(agora)).sessao;
+    const chaves = new Set([k]);
+    for (const [ck, info] of this.indice) if (info.mtime >= agora - 26 * 3600 * 1000) chaves.add(ck);
+    const vistas = new Set();
+    for (const { k: ck } of this.ordenar(chaves)) {
+      if (ck === k) break;
+      const info = this.indice.get(ck);
+      if (!info) continue;
+      for (const est of this.lerSessao(info).todos) for (const chaveResp of est.respostas.keys()) vistas.add(chaveResp);
+    }
+    return this.montar(k, this.registros().get(k), agora, diaLocal(agora), vistas).sessao;
   }
 
   // Registro da sessão, preferindo o que tem processo vivo (pode haver órfãos com o mesmo sessionId).

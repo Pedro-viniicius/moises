@@ -30,12 +30,12 @@ const senha = fs.existsSync(arqSenha) ? fs.readFileSync(arqSenha, 'utf8').trim()
 const token = crypto.randomBytes(32).toString('base64url');
 const segredo = crypto.randomBytes(48).toString('base64url');
 
+// O `mode` só vale ao criar: aperta as permissões de arquivos antigos antes de gravar segredos novos.
+fs.chmodSync(pasta, 0o700);
+for (const a of [arqSenha, arqColetor, arqVercel]) if (fs.existsSync(a)) fs.chmodSync(a, 0o600);
 fs.writeFileSync(arqSenha, senha + '\n', { mode: 0o600 });
 fs.writeFileSync(arqColetor, `MOISES_URL=${url}\nMOISES_TOKEN=${token}\n`, { mode: 0o600 });
 fs.writeFileSync(arqVercel, `PANEL_PASSWORD_HASH=${gerarHashSenha(senha)}\nSESSION_SECRET=${segredo}\nMOISES_TOKEN=${token}\n`, { mode: 0o600 });
-// O `mode` acima só vale ao criar: garante as permissões também em arquivos que já existiam.
-fs.chmodSync(pasta, 0o700);
-for (const a of [arqSenha, arqColetor, arqVercel]) fs.chmodSync(a, 0o600);
 console.log(`Senha do painel em ${arqSenha}`);
 console.log(`Variáveis para a Vercel em ${arqVercel}`);
 console.log(`Configuração do coletor em ${arqColetor}`);

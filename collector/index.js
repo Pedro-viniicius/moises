@@ -53,7 +53,9 @@ async function enviar(conf, corpo) {
     redirect: 'error', // nunca reenviar o retrato para outra origem
   });
   if (!r.ok) throw new Error(`painel respondeu ${r.status}`);
-  return r.json();
+  const txt = await r.text();
+  if (txt.length > 200_000) throw new Error('resposta do painel grande demais');
+  return JSON.parse(txt);
 }
 
 async function main() {

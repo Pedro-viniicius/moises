@@ -2,11 +2,14 @@
 // pid, sessionId, início do processo e executável baterem com o registro do próprio Claude Code.
 // Os limites daqui são locais: nem o site nem o Redis conseguem afrouxá-los.
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { processoConfere, inicioDoProcesso, nomeConta } from './sessoes.js';
 import { diaLocal } from './transcript.js';
 
 export const EXPIRA_MS = 120_000;
-export const MAX_POR_HORA = Number(process.env.MOISES_ENCERRAR_POR_HORA || 5);
+const limiteConfig = Number(process.env.MOISES_ENCERRAR_POR_HORA);
+export const MAX_POR_HORA = Number.isFinite(limiteConfig) && limiteConfig >= 0 ? limiteConfig : 5;
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function nomePadrao(sessao, agora = Date.now()) {
@@ -25,14 +28,34 @@ export function ehClaude(pid) {
   }
 }
 
-// Memória local do que já foi executado e do ritmo de encerramentos.
-const executados = new Set();
-const recentes = [];
+// Memória local do que já foi executado e do ritmo de encerramentos, gravada em disco
+// para um reinício do coletor não zerar os limites.
+const ARQ_LIMITES = process.env.MOISES_LIMITES_ARQ || path.join(os.homedir(), '.local/state/moises/encerrar.json');
+let executados = new Set();
+let recentes = [];
+try {
+  const d = JSON.parse(fs.readFileSync(ARQ_LIMITES, 'utf8'));
+  executados = new Set(d.executados || []);
+  recentes = d.recentes || [];
+} catch {
+  /* primeira vez */
+}
+function gravarLimites() {
+  try {
+    fs.mkdirSync(path.dirname(ARQ_LIMITES), { recursive: true });
+    const tmp = `${ARQ_LIMITES}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }));
+    fs.renameSync(tmp, ARQ_LIMITES);
+  } catch (err) {
+    console.error('[encerrar] não gravou os limites:', err.message);
+  }
+}
 
 export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => process.kill(pid, sig), esperaMaxMs = 10_000, agora = () => Date.now() } = {}) {
   if (process.env.MOISES_ENCERRAR === '0') return { ok: false, erro: 'Encerrar pelo painel está desligado neste computador.' };
   if (executados.has(cmd.id)) return { ok: false, erro: 'Pedido repetido; já foi tratado.' };
   executados.add(cmd.id);
+  gravarLimites();
   if (!(cmd.idadeMs >= 0 && cmd.idadeMs < EXPIRA_MS)) return { ok: false, erro: 'Pedido antigo demais; peça de novo.' };
   while (recentes.length && agora() - recentes[0] > 3600_000) recentes.shift();
   if (recentes.length >= MAX_POR_HORA) return { ok: false, erro: `Limite de ${MAX_POR_HORA} encerramentos por hora atingido.` };
@@ -52,6 +75,7 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
   // Retrato da sessão antes do fim: garante o log mesmo se ela não tiver atividade hoje.
   const antes = coletor.sessaoDe(cmd.chave);
   recentes.push(agora());
+  gravarLimites();
   kill(reg.pid, 'SIGTERM');
   const limite = agora() + esperaMaxMs;
   while (agora() < limite && inicioDoProcesso(reg.pid) === String(reg.procStart)) await espera(250);
