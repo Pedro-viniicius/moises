@@ -30,8 +30,16 @@ const doNavegador = await nav.gerarAparelho();
 let seq = 0;
 const novoId = () => `c_${(++seq).toString(16).padStart(16, '0')}`;
 
-// Aparelho com par de chaves gerado no Node; o kid fixo é o que o arquivo de chaves diz.
+// Aparelho com par de chaves gerado no Node; com `kid`, vale o informado (para o comando dizer outro kid).
 const aparelho = (kid, rotulo) => novoAparelho(kid, rotulo);
+// Rodada de correção 2 (SE-B3): o chaveiro só aceita o kid derivado da chave pública, então os dois
+// aparelhos padrão são gerados uma vez, com o kid derivado (KID_A e KID_B), em vez de kids fixos.
+const CELULAR = aparelho(null, 'celular');
+const TABLET = aparelho(null, 'tablet');
+const KID_A = CELULAR.kid;
+const KID_B = TABLET.kid;
+// Um kid no formato (6 hexadecimais) que não é de nenhum aparelho autorizado.
+const KID_DESCONHECIDO = ['abcdef', 'fedcba', '012345'].find((k) => k !== KID_A && k !== KID_B);
 
 // chaves-comandos.json no formato que `configurar-comandos.js --autorizar` grava.
 function gravarChaves(arquivo, aparelhos, modo = 0o600) {
@@ -63,7 +71,7 @@ function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq,
   fs.mkdirSync(conf, { mode: 0o700 });
   fs.mkdirSync(estado, { mode: 0o700 });
   const chavesArq = path.join(conf, 'chaves-comandos.json');
-  const aps = aparelhos ?? [aparelho('ab2cd3', 'celular'), aparelho('xy7zw8', 'tablet')];
+  const aps = aparelhos ?? [CELULAR, TABLET];
   if (!semChaves) gravarChaves(chavesArq, aps);
   const relogio = { agora: T0 };
   const agora = () => relogio.agora;
@@ -130,7 +138,7 @@ test('recusa assinatura feita com outra chave', (t) => {
 
 test('recusa aparelho desconhecido', (t) => {
   const m = montar(t);
-  const estranho = aparelho('zzzzzz', 'estranho');
+  const estranho = aparelho(KID_DESCONHECIDO, 'estranho');
   const r = m.porteiro.conferir(m.comando({}, estranho));
   assert.equal(r.ok, false);
   assert.equal(r.motivo, 'aparelho');
@@ -160,17 +168,17 @@ test('aparelho com chave pública inválida no arquivo não existe para o portei
   t.mock.method(console, 'error', () => {});
   const m = montar(t);
   const json = JSON.parse(fs.readFileSync(m.chavesArq, 'utf8'));
-  const bytes = Buffer.from(json.xy7zw8.publica, 'base64url');
+  const bytes = Buffer.from(json[KID_B].publica, 'base64url');
   bytes[64] ^= 1; // ponto fora da curva
-  json.xy7zw8.publica = bytes.toString('base64url');
-  json.qqqqqq = { rotulo: 'formato antigo', chave: 'a'.repeat(64), criadaEm: new Date(T0).toISOString() };
+  json[KID_B].publica = bytes.toString('base64url');
+  json[KID_DESCONHECIDO] = { rotulo: 'formato antigo', chave: 'a'.repeat(64), criadaEm: new Date(T0).toISOString() };
   gravarChavesBrutas(m.chavesArq, json);
-  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }]);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: KID_A, rotulo: 'celular' }]);
   assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aparelho');
-  assert.equal(motivo(m.porteiro.conferir(m.comando({ kid: 'qqqqqq' }))), 'aparelho');
+  assert.equal(motivo(m.porteiro.conferir(m.comando({ kid: KID_DESCONHECIDO }))), 'aparelho');
   assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
   // O chaveiro devolve a chave pública como KeyObject, nunca o texto do arquivo.
-  const { chave } = m.chaveiro.obter('ab2cd3');
+  const { chave } = m.chaveiro.obter(KID_A);
   assert.equal(chave.type, 'public');
   assert.equal(chave.asymmetricKeyDetails.namedCurve, 'prime256v1');
 });
@@ -218,8 +226,8 @@ test('relógio do aparelho atrasado: com a idade do servidor recente, a recusa m
   // O recusado por atraso não queima o id nem gasta o teto (nunca volta a valer) e fica na auditoria.
   assert.ok(!(atrasado.id in vistosEm(m.estado)));
   assert.deepEqual(m.recusas()[0], {
-    em: new Date(T0).toISOString(), id: atrasado.id, tipo: 'mensagem', sessao: SESSAO, quem: 'ab2cd3 (celular)',
-    kidInformado: 'ab2cd3', decisao: 'recusado', motivo: 'relogio', resultado: null,
+    em: new Date(T0).toISOString(), id: atrasado.id, tipo: 'mensagem', sessao: SESSAO, quem: `${KID_A} (celular)`,
+    kidInformado: KID_A, decisao: 'recusado', motivo: 'relogio', resultado: null,
   });
 });
 
@@ -438,7 +446,7 @@ test('300 comandos lixo sem assinatura válida não fazem um comando já executa
     const variantes = [
       { ...base, assinatura: ASSINATURA_ERRADA }, // assinatura que não confere, id novo
       { ...base, id: executado.id, assinatura: 'B'.repeat(86) }, // o mesmo id do executado, assinatura errada
-      { ...base, kid: 'qqqqqq' }, // aparelho desconhecido
+      { ...base, kid: KID_DESCONHECIDO }, // aparelho desconhecido
       { ...base, id: `x_${i}` }, // id fora do formato
       (({ assinatura, ...s }) => s)(base), // sem assinatura
     ];
@@ -495,7 +503,7 @@ test('recusa verbo desconhecido mesmo com assinatura válida', (t) => {
 test('recusa tudo sem chave configurada', (t) => {
   t.mock.method(console, 'error', () => {});
   const m = montar(t, { semChaves: true });
-  const estranho = aparelho('ab2cd3', 'x');
+  const estranho = aparelho(null, 'x');
   const valido = m.comando({}, estranho);
   // Arquivo ausente.
   assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'sem_chave' });
@@ -511,12 +519,13 @@ test('recusa tudo sem chave configurada', (t) => {
   foraDaCurva[64] ^= 1;
   const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   const naoCanonica = estranho.publica.slice(0, 86) + B64URL[B64URL.indexOf(estranho.publica.at(-1)) ^ 1];
-  const comPublica = (publica, kid = 'ab2cd3') => JSON.stringify({ [kid]: { rotulo: 'x', publica, criadaEm: new Date(T0).toISOString() } });
+  // Rodada de correção 2 (SE-B3): o kid padrão é o derivado da pública, para cada caso falhar só pelo que testa.
+  const comPublica = (publica, kid = estranho.kid) => JSON.stringify({ [kid]: { rotulo: 'x', publica, criadaEm: new Date(T0).toISOString() } });
   const conteudos = [
     '{nao é json',
     '{}',
     '[]',
-    JSON.stringify({ ab2cd3: { rotulo: 'formato antigo', chave: 'a'.repeat(64) } }),
+    JSON.stringify({ [estranho.kid]: { rotulo: 'formato antigo', chave: 'a'.repeat(64) } }),
     comPublica(estranho.publica, 'AB2CD3'),
     comPublica(estranho.publica, 'ab2cd'),
     comPublica(estranho.publica.slice(1)),
@@ -527,9 +536,11 @@ test('recusa tudo sem chave configurada', (t) => {
     comPublica(foraDaCurva.toString('base64url')),
     comPublica(Buffer.alloc(65).toString('base64url')),
     comPublica(7),
-    JSON.stringify({ ab2cd3: { rotulo: 'as duas', chave: 'a'.repeat(64), publica: 'x' } }),
-    JSON.stringify({ ab2cd3: 'sem objeto' }),
-    JSON.stringify({ __proto__: null, ab2cd3: null }),
+    JSON.stringify({ [estranho.kid]: { rotulo: 'as duas', chave: 'a'.repeat(64), publica: 'x' } }),
+    JSON.stringify({ [estranho.kid]: 'sem objeto' }),
+    JSON.stringify({ __proto__: null, [estranho.kid]: null }),
+    // A pública certa num kid que não é o dela (SE-B3).
+    comPublica(estranho.publica, KID_DESCONHECIDO === estranho.kid ? '000000' : KID_DESCONHECIDO),
   ];
   for (const c of conteudos) {
     fs.writeFileSync(m.chavesArq, c, { mode: 0o600 });
@@ -559,7 +570,7 @@ test('ignora arquivo de chaves com permissão 644', (t) => {
   assert.deepEqual(m.chaveiro.aparelhos(), []);
   // Voltando a 600, as chaves valem sem reiniciar.
   fs.chmodSync(m.chavesArq, 0o600);
-  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }, { kid: 'xy7zw8', rotulo: 'tablet' }]);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: KID_A, rotulo: 'celular' }, { kid: KID_B, rotulo: 'tablet' }]);
   assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
 });
 
@@ -724,27 +735,34 @@ test('recusa o 31º comando válido no mesmo minuto', (t) => {
 });
 
 test('revogar um aparelho no arquivo passa a valer sem reiniciar', (t) => {
+  t.mock.method(console, 'error', () => {});
   const m = montar(t);
   assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aceito');
-  assert.equal(m.chaveiro.obter('xy7zw8').rotulo, 'tablet');
+  assert.equal(m.chaveiro.obter(KID_B).rotulo, 'tablet');
   // Revoga o tablet, como o configurar-comandos faz (temporário e rename).
   gravarChaves(m.chavesArq, [m.aps[0]]);
-  assert.equal(m.chaveiro.obter('xy7zw8'), null);
-  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }]);
+  assert.equal(m.chaveiro.obter(KID_B), null);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: KID_A, rotulo: 'celular' }]);
   assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aparelho');
   assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
-  // Trocar a chave de um aparelho sem mudar o tamanho do arquivo também vale (gravação no mesmo arquivo).
-  const nova = aparelho('ab2cd3', 'celular');
+  // Mudar o arquivo sem mudar o tamanho também vale (gravação no mesmo arquivo): o rótulo trocado aparece.
+  // Rodada de correção 2 (SE-B3): trocar só a pública sob o mesmo kid não vale mais (o kid deixa de ser o
+  // da pública), e o aparelho some do chaveiro.
   const json = JSON.parse(fs.readFileSync(m.chavesArq, 'utf8'));
-  json.ab2cd3.publica = nova.publica;
+  json[KID_A].rotulo = 'CELULAR';
   fs.writeFileSync(m.chavesArq, JSON.stringify(json));
   // Data explícita: em kernel sem carimbo de tempo fino, duas gravações seguidas podem ter o mesmo mtime.
   fs.utimesSync(m.chavesArq, new Date(T0 + 1_000), new Date(T0 + 1_000));
-  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'assinatura');
-  assert.equal(motivo(m.porteiro.conferir(m.comando({}, nova))), 'aceito');
+  assert.equal(m.chaveiro.obter(KID_A).rotulo, 'CELULAR');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  const nova = aparelho(KID_A, 'celular');
+  json[KID_A].publica = nova.publica;
+  fs.writeFileSync(m.chavesArq, JSON.stringify(json));
+  fs.utimesSync(m.chavesArq, new Date(T0 + 2_000), new Date(T0 + 2_000));
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, nova))), 'sem_chave');
   // Apagar o arquivo desliga tudo.
   fs.rmSync(m.chavesArq);
-  assert.equal(motivo(m.porteiro.conferir(m.comando({}, nova))), 'sem_chave');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'sem_chave');
 });
 
 test('cada comando aceito fica na auditoria com quem, quando, sessão, verbo e decisão', (t) => {
@@ -757,11 +775,11 @@ test('cada comando aceito fica na auditoria com quem, quando, sessão, verbo e d
   const [l1, l2] = m.linhas();
   assert.deepEqual(l1, {
     em: new Date(T0 + 1_234).toISOString(), id: cmd.id, tipo: 'mensagem', sessao: SESSAO,
-    quem: 'ab2cd3 (celular)', decisao: 'aceito', motivo: null, resultado: null,
+    quem: `${KID_A} (celular)`, decisao: 'aceito', motivo: null, resultado: null,
   });
   assert.deepEqual(l2, {
     em: new Date(T0 + 1_234).toISOString(), id: abrir.id, tipo: 'abrir', sessao: null,
-    quem: 'xy7zw8 (tablet)', decisao: 'aceito', motivo: null, resultado: null,
+    quem: `${KID_B} (tablet)`, decisao: 'aceito', motivo: null, resultado: null,
   });
 });
 
@@ -771,7 +789,7 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
     [(({ assinatura, ...s }) => s)(m.comando()), 'sem_credencial'],
     [m.comando({ v: 2 }), 'formato'],
     [m.comando({ tipo: 'apagar' }), 'verbo'],
-    [m.comando({}, aparelho('qqqqqq', 'x')), 'aparelho'],
+    [m.comando({}, aparelho(KID_DESCONHECIDO, 'x')), 'aparelho'],
     [{ ...m.comando(), assinatura: ASSINATURA_ERRADA }, 'assinatura'],
     [m.comando({ criadoEm: T0 - JANELA_MS }), 'expirado'],
     [m.comando({ criadoEm: T0 + 31_000 }), 'relogio'],
@@ -793,10 +811,10 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
   // Antes da assinatura conferir, `quem` é nulo e o kid que o comando diz ter vai em `kidInformado`;
   // depois, `quem` é kid e rótulo.
   for (const i of [0, 1, 2, 3, 4]) assert.equal(linhas[i].quem, null, casos[i][1]);
-  assert.equal(linhas[3].kidInformado, 'qqqqqq');
-  assert.equal(linhas[4].kidInformado, 'ab2cd3');
-  assert.equal(linhas[6].quem, 'ab2cd3 (celular)');
-  assert.equal(linhas[6].kidInformado, 'ab2cd3');
+  assert.equal(linhas[3].kidInformado, KID_DESCONHECIDO);
+  assert.equal(linhas[4].kidInformado, KID_A);
+  assert.equal(linhas[6].quem, `${KID_A} (celular)`);
+  assert.equal(linhas[6].kidInformado, KID_A);
   // kid fora do formato não vai nem para `kidInformado`.
   m.porteiro.conferir(m.comando({ kid: 'AB2CD3' }));
   m.porteiro.conferir({ ...m.comando(), kid: `ab\n${'x'.repeat(100)}`, assinatura: undefined });
@@ -814,7 +832,7 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
   n.porteiro.conferir(um);
   n.porteiro.conferir(n.comando());
   assert.deepEqual(n.linhas().map((l) => l.decisao), ['aceito']);
-  assert.deepEqual(n.recusas().map((l) => [l.motivo, l.quem]), [['repetido', 'ab2cd3 (celular)'], ['ritmo', 'ab2cd3 (celular)']]);
+  assert.deepEqual(n.recusas().map((l) => [l.motivo, l.quem]), [['repetido', `${KID_A} (celular)`], ['ritmo', `${KID_A} (celular)`]]);
 });
 
 test('recusas em massa não empurram os aceitos para fora da auditoria', (t) => {
@@ -947,12 +965,12 @@ test('concluir registra feito ou falhou', (t) => {
   const [, , feito, falhou] = m.linhas();
   assert.deepEqual(feito, {
     em: new Date(T0 + 5_000).toISOString(), id: a.id, tipo: 'mensagem', sessao: SESSAO,
-    quem: 'ab2cd3 (celular)', decisao: 'feito', motivo: null, resultado: null,
+    quem: `${KID_A} (celular)`, decisao: 'feito', motivo: null, resultado: null,
   });
   assert.equal(falhou.decisao, 'falhou');
   assert.equal(falhou.id, b.id);
   assert.equal(falhou.tipo, 'interromper');
-  assert.equal(falhou.quem, 'xy7zw8 (tablet)');
+  assert.equal(falhou.quem, `${KID_B} (tablet)`);
   // Só a primeira frase do erro (até o primeiro ponto, dois-pontos ou quebra de linha).
   assert.equal(falhou.resultado, 'A sessão mudou desde que você abriu o painel; atualize e tente de novo');
   // Fim do stderr de um processo: nada depois da primeira frase vai para a auditoria.

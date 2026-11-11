@@ -38,45 +38,80 @@ export function ehClaude(pid) {
 let arqLimites = null;
 let executados = null;
 let recentes = null;
-function carregarLimites() {
+// Dia (AAAA-MM-DD) até o qual o arquivo de limites estragado segura os encerramentos; null se não segura.
+let bloqueadoAte = null;
+const ERRO_GRAVAR = 'Não foi possível registrar o pedido de encerrar neste computador; nada foi feito.';
+const listaDe = (v, confere) => v === undefined || (Array.isArray(v) && v.every(confere));
+
+// Arquivo ausente conta zero. Corrompido ou ilegível conta como teto atingido até o dia virar, com erro
+// no log: o dia é o da última gravação do arquivo (mtime), e um arquivo estragado num dia anterior não
+// segura hoje. Enquanto segura, o arquivo não é regravado (SE-B2, falha fechada).
+function carregarLimites(agora) {
   if (executados) return;
   arqLimites = process.env.MOISES_LIMITES_ARQ || path.join(os.homedir(), '.local/state/moises/encerrar.json');
   executados = new Set();
   recentes = [];
+  bloqueadoAte = null;
+  let motivo;
   try {
     const d = JSON.parse(fs.readFileSync(arqLimites, 'utf8'));
-    executados = new Set(d.executados || []);
-    recentes = d.recentes || [];
-  } catch {
-    /* primeira vez */
+    if (d !== null && typeof d === 'object' && !Array.isArray(d) && listaDe(d.executados, (x) => typeof x === 'string') && listaDe(d.recentes, Number.isFinite)) {
+      executados = new Set(d.executados ?? []);
+      recentes = d.recentes ?? [];
+      return;
+    }
+    motivo = 'corrompido';
+  } catch (err) {
+    if (err?.code === 'ENOENT') return; // primeira vez
+    // A mensagem do JSON.parse cita o conteúdo: no log vai só o código.
+    motivo = err?.code ? `ilegível (${err.code})` : 'corrompido';
   }
+  try {
+    bloqueadoAte = diaLocal(fs.statSync(arqLimites).mtimeMs);
+  } catch {
+    bloqueadoAte = diaLocal(agora());
+  }
+  console.error(`[encerrar] o arquivo de limites está ${motivo}; encerrar pelo painel fica recusado até o dia virar.`);
 }
 // Esquece o que está em memória; a próxima chamada relê o arquivo. Uso em teste.
 export function reiniciarLimites() {
   arqLimites = null;
   executados = null;
   recentes = null;
+  bloqueadoAte = null;
 }
+// Devolve false se não conseguiu gravar: quem chama recusa a ação (falha fechada).
 function gravarLimites() {
+  const tmp = `${arqLimites}.tmp`;
   try {
     fs.mkdirSync(path.dirname(arqLimites), { recursive: true, mode: 0o700 });
-    const tmp = `${arqLimites}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }), { mode: 0o600 });
     fs.renameSync(tmp, arqLimites);
+    return true;
   } catch (err) {
-    console.error('[encerrar] não gravou os limites:', err.message);
+    console.error(`[encerrar] não gravou os limites (${err?.code || 'erro'}); o pedido foi recusado.`);
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* nada a limpar */
+    }
+    return false;
   }
 }
 
 export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => process.kill(pid, sig), esperaMaxMs = 10_000, agora = () => Date.now() } = {}) {
   if (process.env.MOISES_ENCERRAR === '0') return { ok: false, erro: 'Encerrar pelo painel está desligado neste computador.' };
-  carregarLimites();
+  carregarLimites(agora);
+  const porHora = maxPorHora();
+  if (bloqueadoAte !== null) {
+    if (diaLocal(agora()) <= bloqueadoAte) return { ok: false, erro: `Limite de ${porHora} encerramentos por hora atingido.` };
+    bloqueadoAte = null; // o dia virou: começa do zero e a próxima gravação substitui o arquivo estragado
+  }
   if (executados.has(cmd.id)) return { ok: false, erro: 'Pedido repetido; já foi tratado.' };
   executados.add(cmd.id);
-  gravarLimites();
+  if (!gravarLimites()) return { ok: false, erro: ERRO_GRAVAR };
   if (!(cmd.idadeMs >= 0 && cmd.idadeMs < EXPIRA_MS)) return { ok: false, erro: 'Pedido antigo demais; peça de novo.' };
   while (recentes.length && agora() - recentes[0] > 3600_000) recentes.shift();
-  const porHora = maxPorHora();
   if (recentes.length >= porHora) return { ok: false, erro: `Limite de ${porHora} encerramentos por hora atingido.` };
 
   const sep = String(cmd.chave || '').indexOf(':');
@@ -94,7 +129,7 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
   // Retrato da sessão antes do fim: garante o log mesmo se ela não tiver atividade hoje.
   const antes = coletor.sessaoDe(cmd.chave);
   recentes.push(agora());
-  gravarLimites();
+  if (!gravarLimites()) return { ok: false, erro: ERRO_GRAVAR };
   kill(reg.pid, 'SIGTERM');
   const limite = agora() + esperaMaxMs;
   while (agora() < limite && inicioDoProcesso(reg.pid) === String(reg.procStart)) await espera(250);

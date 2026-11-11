@@ -23,8 +23,28 @@ process.env.MOISES_LIMITES_ARQ = path.join(BASE, 'limites-encerrar.json');
 after(() => fs.rmSync(BASE, { recursive: true, force: true }));
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const CONFIG_FIXA =
-  '{"permissions":{"disableBypassPermissionsMode":"disable","deny":["Read(~/.config/moises/**)","Edit(~/.config/moises/**)","Read(~/.ssh/**)","Edit(~/.ssh/**)","Read(~/.local/state/moises/**)","Edit(~/.local/state/moises/**)"]}}';
+// Rodada de correção 2 (SE-M5b): Read, Edit e Write negados nos caminhos padrão, no systemd do usuário e
+// na raiz real do repositório do coletor (a pasta acima de test/). Na regra, a pasta pessoal vira `~/` e o
+// resto `//`; um caminho que é link entra também pelo destino.
+const HOME = os.homedir();
+const RAIZ_COLETOR = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
+const formaDaRegra = (p) => (p.startsWith(HOME + path.sep) ? `~/${path.relative(HOME, p)}` : `/${p}`);
+const comDestino = (p) => {
+  let real = p;
+  try {
+    real = fs.realpathSync(p);
+  } catch {
+    /* não existe */
+  }
+  return real === p ? [p] : [p, real];
+};
+const PROTEGIDOS = [...new Set([...['.config/moises', '.ssh', '.local/state/moises', '.config/systemd/user'].map((r) => path.join(HOME, r)), RAIZ_COLETOR].flatMap(comDestino))];
+const CONFIG_FIXA = JSON.stringify({
+  permissions: {
+    disableBypassPermissionsMode: 'disable',
+    deny: PROTEGIDOS.flatMap((p) => ['Read', 'Edit', 'Write'].map((f) => `${f}(${formaDaRegra(p)}/**)`)),
+  },
+});
 const AMBIENTE = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SHELL', 'TMPDIR'];
 const ERRO_VISTO = 'A sessão mudou desde que você abriu o painel; atualize e tente de novo.';
 const ERRO_INIT = 'A sessão abriu com configuração diferente da esperada e foi encerrada.';

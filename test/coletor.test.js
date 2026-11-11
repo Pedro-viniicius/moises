@@ -19,8 +19,11 @@ const tmp = () => {
   criadas.push(d);
   return d;
 };
+// Rodada de correção 2 (Q4): o arquivo de limites do encerrar também é apagado no fim.
+const ARQ_LIMITES = process.env.MOISES_LIMITES_ARQ;
 after(() => {
   for (const d of criadas) fs.rmSync(d, { recursive: true, force: true });
+  for (const arq of [ARQ_LIMITES, `${ARQ_LIMITES}.tmp`]) fs.rmSync(arq, { force: true });
 });
 const linha = (o) => JSON.stringify(o) + '\n';
 const agoraIso = (ms = Date.now()) => new Date(ms).toISOString();

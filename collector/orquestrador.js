@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nomeConta } from './sessoes.js';
@@ -26,21 +27,28 @@ export const FERRAMENTAS_PADRAO = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Gre
 
 // O modo que o `init` tem de mostrar para cada modo pedido.
 const MODO_NO_INIT = { manual: 'default', acceptEdits: 'acceptEdits', plan: 'plan' };
-// Configuração fixa da sessão: bypass desligado e os caminhos do coletor e do SSH negados.
-const CONFIG_FIXA = JSON.stringify({
-  permissions: {
-    disableBypassPermissionsMode: 'disable',
-    deny: [
-      'Read(~/.config/moises/**)',
-      'Edit(~/.config/moises/**)',
-      'Read(~/.ssh/**)',
-      'Edit(~/.ssh/**)',
-      'Read(~/.local/state/moises/**)',
-      'Edit(~/.local/state/moises/**)',
-    ],
-  },
-});
-const ARG_PROIBIDO = /bypass|dangerously|permission|allowed|settings|setting-sources|add-dir|mcp|plugin/i;
+// Pastas que nenhuma sessão comandada lê nem altera, relativas à pasta pessoal: chaves e configuração do
+// Moisés, SSH, estado do coletor e os serviços do systemd do usuário (onde o coletor é instalado). Somam-se
+// a elas a raiz do repositório do coletor e as passadas em `protegidos` (SE-M5b).
+const PROTEGIDOS_PADRAO = ['.config/moises', '.ssh', '.local/state/moises', '.config/systemd/user'];
+// Caractere que a regra de permissão do Claude Code leria como padrão (glob, negação, comentário) ou que
+// fecharia a regra antes da hora: caminho protegido com ele não vira regra.
+const RE_CAMINHO_RUIM = /[*?[\]{}()\\!#\p{Cc}]/u;
+// Caractere que continua um nome de pasta: `<protegido>-copia` não é o protegido.
+const RE_CONTINUA_NOME = /[A-Za-z0-9._-]/;
+// Flags que o coletor já define nos argumentos fixos, ou que trocariam sessão, modelo, prompt acrescentado
+// ou agentes: argsExtra não repete nem sobrepõe nenhuma, nem usa opção curta (SE-B4).
+const FLAGS_FIXAS = [
+  'print', 'input-format', 'output-format', 'verbose', 'permission-prompt-tool', 'resume', 'continue', 'fork-session',
+  'session-id', 'permission-mode', 'model', 'fallback-model', 'effort', 'name', 'worktree', 'restricted', 'tools',
+  'strict-mcp-config', 'disable-slash-commands', 'settings', 'max-budget-usd', 'append-system-prompt',
+  'append-system-prompt-file', 'agents', 'agent', 'mcp-config', 'allowedTools', 'allowed-tools', 'disallowedTools',
+  'disallowed-tools', 'add-dir',
+];
+const ARG_PROIBIDO = new RegExp(
+  `bypass|dangerously|permission|allowed|settings|setting-sources|add-dir|mcp|plugin|^-[A-Za-z]|^--(?:${FLAGS_FIXAS.join('|')})(?:=|$)`,
+  'i',
+);
 const RE_FERRAMENTA_CONF = /^[A-Za-z]{1,30}$/;
 const RE_FERRAMENTA = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
@@ -50,6 +58,18 @@ const RE_CHAVE = /^([a-z0-9]{1,20}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 const SENSIVEL = /\.config\/moises|\.local\/state\/moises|\.ssh\b|\bprintenv\b|(^|[\s;&|])env(\s|$)|\.claude\/settings|\.git\/hooks|credentials/;
 // Comando de Bash com caractere fora de ASCII imprimível (homóglifo, letra acentuada, invisível) também é sensível (S26).
 const FORA_DO_ASCII = /[^\x20-\x7E\n\t]/;
+// Comando de Bash que costuma esconder o que de fato roda (SE-M5a): substituição de comando ($( ou crase),
+// eval, base64, /proc/, environ e interpretador com o código na própria linha (python, node, perl, ruby,
+// bash, sh ou zsh com -c ou -e). É heurística para "aprovar só no computador", não fronteira de segurança:
+// quem quer disfarçar um comando acha outra forma, e o que barra de verdade são as regras deny e o `--tools`.
+const BASH_OPACO = [
+  /\$\(|`/,
+  /\beval\b/,
+  /base64/,
+  /\/proc\//,
+  /environ/,
+  /(^|[^A-Za-z0-9_.-])(python[0-9.]*|node|perl|ruby|bash|sh|zsh)(\s+--?[A-Za-z][A-Za-z-]*)*?\s+(-[A-Za-z]*[ce][A-Za-z]*|--eval|--command)(?![A-Za-z0-9_-])/,
+];
 // A raiz do repositório onde este coletor roda (a pasta acima de collector/).
 const RAIZ_COLETOR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // Campos de entrada do Bash que não mudam o que roda: com eles, o painel mostra só o comando.
@@ -71,6 +91,7 @@ const ERROS = {
   conta: 'Conta desconhecida neste computador.',
   tetoSessoes: (n) => `Já há ${n} sessões comandadas abertas; encerre uma antes de abrir outra.`,
   tetoDia: (n) => `Limite de ${n} aberturas e retomadas pelo painel hoje atingido.`,
+  semSessoes: 'Abrir e retomar sessões pelo painel estão desligados neste computador (máximo de 0 sessões comandadas).',
   contagem: 'Não foi possível registrar a abertura neste computador; nada foi aberto.',
   naoComandada: 'Esta sessão não foi aberta pelo Moisés; só é possível ver e encerrar.',
   naoPendente: 'Este pedido de permissão não está mais pendente.',
@@ -154,6 +175,50 @@ function textoDoPedido(ferramenta, input) {
   return JSON.stringify(input ?? null, null, 2) ?? '';
 }
 
+// Os caminhos protegidos e as regras deny do `--settings`. Cada caminho entra como veio (absoluto, sem
+// barra no fim) e, se existir e for outro, também pelo caminho real. Na regra, o que fica na pasta pessoal
+// usa `~/` e o resto `//` (uma barra só seria relativa ao arquivo de configuração, não à raiz). Lança
+// TypeError, sem citar o valor, para caminho que não é absoluto, que é a raiz ou a pasta pessoal inteira,
+// ou que tem caractere que a regra leria como padrão.
+function montarProtegidos(caminhos, home) {
+  const lista = [];
+  for (const c of caminhos) {
+    if (typeof c !== 'string' || !path.isAbsolute(c)) throw new TypeError('protegidos inválidos: só caminhos absolutos.');
+    const p = path.resolve(c);
+    if (p === path.parse(p).root || p === home) throw new TypeError('protegidos inválidos: nem a raiz nem a pasta pessoal inteira.');
+    let real = p;
+    try {
+      real = fs.realpathSync(p);
+    } catch {
+      /* ainda não existe: vale o caminho como veio */
+    }
+    for (const q of [p, real]) if (!lista.includes(q)) lista.push(q);
+  }
+  const regras = [];
+  const formas = [];
+  for (const p of lista) {
+    const naPastaPessoal = p.startsWith(home + path.sep);
+    const rel = naPastaPessoal ? path.relative(home, p) : null;
+    const alvo = naPastaPessoal ? `~/${rel}` : `/${p}`;
+    if (RE_CAMINHO_RUIM.test(alvo)) throw new TypeError('protegidos inválidos: caminho com caractere de padrão (* ? [ ] { } ( ) \\ ! #) ou de controle.');
+    for (const ferramenta of ['Read', 'Edit', 'Write']) regras.push(`${ferramenta}(${alvo}/**)`);
+    formas.push(p);
+    if (naPastaPessoal) formas.push(`~/${rel}`, `$HOME/${rel}`, `\${HOME}/${rel}`);
+  }
+  return { regras, formas };
+}
+
+// Verdadeiro se o texto cita alguma das formas como caminho (o caractere seguinte não continua o nome).
+function citaCaminho(texto, formas) {
+  for (const f of formas) {
+    for (let i = texto.indexOf(f); i !== -1; i = texto.indexOf(f, i + 1)) {
+      const depois = texto[i + f.length];
+      if (depois === undefined || !RE_CONTINUA_NOME.test(depois)) return true;
+    }
+  }
+  return false;
+}
+
 function vistoConfere(visto, real) {
   if (!ehObjeto(visto) || typeof visto.projeto !== 'string' || visto.projeto.length > MAX_VISTO) return false;
   if (!(visto.nome === null || (typeof visto.nome === 'string' && visto.nome.length <= MAX_VISTO))) return false;
@@ -180,6 +245,7 @@ export class Orquestrador {
     esperaTermMs = 5000,
     kill = null,
     pastaColetor = RAIZ_COLETOR,
+    protegidos = [],
   } = {}) {
     // As mensagens de erro não citam o valor recebido (argsExtra pode trazer um prompt inteiro).
     if (!Array.isArray(argsExtra) || argsExtra.some((a) => typeof a !== 'string' || ARG_PROIBIDO.test(a))) {
@@ -191,6 +257,12 @@ export class Orquestrador {
     if (typeof tetoSessaoUsd !== 'number' || !(tetoSessaoUsd >= 0.01 && tetoSessaoUsd <= 100)) {
       throw new Error('teto de gasto por sessão inválido: número entre 0,01 e 100.');
     }
+    if (!Number.isSafeInteger(maxSessoes) || maxSessoes < 0) throw new TypeError('maxSessoes inválido: inteiro maior ou igual a 0.');
+    if (!Number.isSafeInteger(maxAbrirPorDia) || maxAbrirPorDia < 0) throw new TypeError('maxAbrirPorDia inválido: inteiro maior ou igual a 0.');
+    if (typeof permissaoExpiraMs !== 'number' || !Number.isFinite(permissaoExpiraMs) || permissaoExpiraMs <= 0) {
+      throw new TypeError('permissaoExpiraMs inválido: número finito maior que 0.');
+    }
+    if (!Array.isArray(protegidos)) throw new TypeError('protegidos inválidos: lista de caminhos absolutos.');
     this.coletor = coletor;
     this.projetos = projetos;
     this.pastaEstado = pastaEstado;
@@ -210,6 +282,12 @@ export class Orquestrador {
     this.opcoesEncerrar = kill ? { kill } : {};
     // Caminho real; se não der para resolver, o caminho absoluto como veio (a recusa continua valendo para ele).
     this.pastaColetor = pastaReal(pastaColetor) ?? path.resolve(String(pastaColetor));
+    // Configuração fixa da sessão: bypass desligado e os caminhos protegidos negados para leitura e escrita.
+    // A raiz do coletor é a mesma que `contemColetor` usa: uma sessão comandada não reescreve o coletor (SE-M5b).
+    const home = os.homedir();
+    const { regras, formas } = montarProtegidos([...PROTEGIDOS_PADRAO.map((r) => path.join(home, r)), this.pastaColetor, ...protegidos], home);
+    this.configFixa = JSON.stringify({ permissions: { disableBypassPermissionsMode: 'disable', deny: regras } });
+    this.formasProtegidas = formas;
     this.sessoes = new Map(); // chave → registro do processo comandado
     this.falhas = new Map(); // chave → { erro, em, ... } de sessão comandada que morreu sozinha
     this.cwdCache = new Map(); // chave de sessão encerrada → pasta (para `retomavel`, sem reler a cada ciclo)
@@ -436,7 +514,7 @@ export class Orquestrador {
       `--tools=${this.ferramentas.join(',')}`,
       '--strict-mcp-config',
       '--disable-slash-commands',
-      `--settings=${CONFIG_FIXA}`,
+      `--settings=${this.configFixa}`,
       `--max-budget-usd=${this.tetoSessaoUsd}`,
     );
     return [...a, ...this.argsExtra];
@@ -616,7 +694,10 @@ export class Orquestrador {
       entrada,
       // Inteiro só se nada foi mascarado, cortado ou escapado e se o texto não tem jeito de esconder parte de si (S14).
       completo: subirTexto && nomeOk && !alterado && ehObjeto(req.input) && !escondeConteudo(texto),
-      sensivel: SENSIVEL.test(textoCompleto) || (comandoBash !== null && FORA_DO_ASCII.test(comandoBash)),
+      sensivel:
+        SENSIVEL.test(textoCompleto) ||
+        citaCaminho(textoCompleto, this.formasProtegidas) ||
+        (comandoBash !== null && (FORA_DO_ASCII.test(comandoBash) || BASH_OPACO.some((re) => re.test(comandoBash)))),
       criadoEm: this.agora(),
       hash: hashVisto(ferramenta, entrada),
       input: req.input,
@@ -848,6 +929,7 @@ export class Orquestrador {
   }
 
   conferirTetos() {
+    if (this.maxSessoes === 0) return ERROS.semSessoes;
     if (this.abertas() >= this.maxSessoes) return ERROS.tetoSessoes(this.maxSessoes);
     if (this.lerContagem().n >= this.maxAbrirPorDia) return ERROS.tetoDia(this.maxAbrirPorDia);
     return null;
@@ -857,20 +939,48 @@ export class Orquestrador {
     return path.join(this.pastaEstado, 'abrir.json');
   }
 
+  // Contagem do dia. Arquivo ausente conta zero; de outro dia, também. Corrompido ou ilegível conta como
+  // teto atingido (n = Infinity) até o dia virar, com erro no log: o dia é o da última gravação do
+  // arquivo (mtime), e um contador estragado num dia anterior não segura hoje (SE-B2, falha fechada).
   lerContagem() {
     const dia = diaLocal(this.agora());
+    const arq = this.arqContagem();
+    let bruto;
     try {
-      const c = JSON.parse(fs.readFileSync(this.arqContagem(), 'utf8'));
-      if (c?.dia === dia && Number.isSafeInteger(c.n) && c.n >= 0) return { dia, n: c.n };
-    } catch {
-      /* primeira abertura, ou arquivo ilegível: conta do zero */
+      bruto = fs.readFileSync(arq, 'utf8');
+    } catch (err) {
+      if (err?.code === 'ENOENT') return { dia, n: 0 };
+      return this.contagemEstragada(dia, `ilegível (${err?.code || 'erro'})`);
     }
-    return { dia, n: 0 };
+    let c = null;
+    try {
+      c = JSON.parse(bruto);
+    } catch {
+      /* corrompido; a mensagem do JSON.parse cita o conteúdo e não vai para o log */
+    }
+    if (ehObjeto(c) && typeof c.dia === 'string') {
+      if (c.dia !== dia) return { dia, n: 0 };
+      if (Number.isSafeInteger(c.n) && c.n >= 0) return { dia, n: c.n };
+    }
+    return this.contagemEstragada(dia, 'corrompido');
+  }
+
+  contagemEstragada(dia, motivo) {
+    let diaDoArquivo = null;
+    try {
+      diaDoArquivo = diaLocal(fs.statSync(this.arqContagem()).mtimeMs);
+    } catch {
+      /* sem a data, vale para hoje */
+    }
+    if (diaDoArquivo !== null && diaDoArquivo < dia) return { dia, n: 0 };
+    console.error(`orquestrador: o contador de aberturas (abrir.json) está ${motivo}; aberturas e retomadas pelo painel recusadas até o dia virar.`);
+    return { dia, n: Infinity };
   }
 
   // Grava antes de abrir (temporário + rename, permissão 600). Se não conseguir gravar, não abre.
   contarAbertura() {
     const { dia, n } = this.lerContagem();
+    if (!Number.isSafeInteger(n)) return false;
     const arq = this.arqContagem();
     const tmp = `${arq}.${process.pid}.tmp`;
     try {
@@ -878,7 +988,8 @@ export class Orquestrador {
       fs.writeFileSync(tmp, JSON.stringify({ dia, n: n + 1 }), { mode: 0o600 });
       fs.renameSync(tmp, arq);
       return true;
-    } catch {
+    } catch (err) {
+      console.error(`orquestrador: não foi possível gravar o contador de aberturas (abrir.json) (${err?.code || 'erro'}); nada foi aberto.`);
       try {
         fs.rmSync(tmp, { force: true });
       } catch {

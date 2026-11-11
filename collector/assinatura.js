@@ -12,7 +12,9 @@ const TAMANHO_PUBLICA = 65; // 0x04 || x (32) || y (32)
 const TAMANHO_ASSINATURA = 64; // IEEE P1363: r (32) || s (32)
 export const RE_PUBLICA = /^[A-Za-z0-9_-]{87}$/;
 const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
-const RE_KID = /^[0-9a-f]{6}$/;
+// O kid: 6 hexadecimais minúsculos (o começo do SHA-256 da pública). A única regex de kid do coletor:
+// o porteiro e o chaveiro (collector/comandos.js) usam esta (SE-B3).
+export const RE_KID = /^[0-9a-f]{6}$/;
 const MAX_ROTULO = 40;
 // Controle, formatação (inclusive direção de texto) e separadores de linha: nada disso num rótulo.
 const INVISIVEL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;

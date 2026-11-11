@@ -6,7 +6,7 @@
 // assinatura; S11: teto por minuto só para assinatura válida; R1: data no futuro também gasta o teto).
 import fs from 'node:fs';
 import path from 'node:path';
-import { assinaturaConfere, chavePublica } from './assinatura.js';
+import { assinaturaConfere, chavePublica, impressaoDaPublica, RE_KID } from './assinatura.js';
 import { pastaSoDoDono } from './auditoria.js';
 
 export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
@@ -23,8 +23,7 @@ const ARQ_VISTOS = 'comandos-vistos.json';
 const MAX_DADOS = 8_000;
 const MAX_ROTULO = 40;
 
-// Campos do comando (conferidos antes da assinatura).
-const RE_KID = /^[a-z0-9]{6}$/;
+// Campos do comando (conferidos antes da assinatura). O kid usa a regex de collector/assinatura.js.
 const RE_ID = /^c_[0-9a-f]{16}$/;
 const RE_TIPO = /^[A-Za-z_]{1,20}$/; // só a forma; se é um verbo conhecido, decide a etapa `verbo`
 const RE_SESSAO = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -125,6 +124,12 @@ export class Chaveiro {
         const chave = RE_KID.test(kid) && objetoSimples(e) ? chavePublica(e.publica) : null;
         if (!chave) {
           ignorados++;
+          continue;
+        }
+        // O kid tem de ser o derivado da própria chave pública (SE-B3): uma chave copiada para outro kid,
+        // ou um kid com a chave de outro aparelho, não vale. O aviso cita só o kid (já conferido no formato).
+        if (impressaoDaPublica(e.publica)?.kid !== kid) {
+          console.error(`chaveiro: aparelho ${kid} ignorado: o kid não é o da chave pública dele; autorize de novo com configurar-comandos.js --pedidos e --autorizar.`);
           continue;
         }
         const rotulo = typeof e.rotulo === 'string' ? Array.from(e.rotulo).slice(0, MAX_ROTULO).join('') : '';
@@ -274,6 +279,7 @@ function formatoConfere(c) {
 
 export class Porteiro {
   constructor({ chaveiro, pastaEstado, auditoria, agora = () => Date.now(), maxPorMinuto = 30 }) {
+    if (!Number.isSafeInteger(maxPorMinuto) || maxPorMinuto <= 0) throw new TypeError('maxPorMinuto inválido: inteiro maior que 0.');
     this.chaveiro = chaveiro;
     this.pastaEstado = pastaEstado;
     this.auditoria = auditoria;
@@ -338,9 +344,10 @@ export class Porteiro {
       if (c.criadoEm - agora > FOLGA_FUTURO_MS) {
         // Já guardado: recusa de novo sem gastar o teto nem regravar o arquivo.
         if (this.vistos.has(c.id)) return recusa('relogio');
-        // Guardado como visto, para quem copiou o comando não reenviá-lo quando ele couber na folga:
-        // até a data dele, limitada ao horizonte, para a poda por tempo alcançá-lo. Passa pelo teto
-        // por minuto (só assinatura válida chega aqui), que limita o crescimento junto com o horizonte.
+        // O id é sempre guardado como visto, caiba ou não no teto, para quem copiou o comando não
+        // reenviá-lo quando ele couber na folga: até a data dele, limitada a agora + 24 h. O teto por
+        // minuto aqui só decide a mensagem (`relogio` ou `ritmo`); quem limita o arquivo de vistos é o
+        // horizonte de 24 h, com a poda por tempo.
         this.vistos.set(c.id, Math.max(agora, Math.min(c.criadoEm, agora + HORIZONTE_FUTURO_MS)));
         const cabe = this.#cabeNoRitmo(agora);
         this.#gravarVistos(agora);

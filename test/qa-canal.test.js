@@ -186,7 +186,8 @@ test('CA2: toda recusa gera ack recusado com motivo e nenhuma chega ao orquestra
   const comandos = [
     [semAssinatura, 'sem_credencial'],
     [novo({}, intruso), 'assinatura'],
-    [novo({ kid: 'zzzzzz' }), 'aparelho'],
+    // Rodada de correção 2 (SE-B3): o kid tem de ser hexadecimal (senão é `formato`); este não é de ninguém.
+    [novo({ kid: ['abcdef', 'fedcba', '012345'].find((k) => k !== doColetor.kid && k !== doNavegador.kid) }), 'aparelho'],
     [novo({ criadoEm: T0 - JANELA_MS }), 'expirado'],
     [novo({ criadoEm: T0 + FOLGA_FUTURO_MS + 1 }), 'relogio'],
     [novo({ tipo: 'apagar' }), 'verbo'],
@@ -318,7 +319,9 @@ test('foco 1: comando válido repetido por quem controla o Redis, depois de enxu
   const rep1 = await ate(() => painel1.acks().find((a) => a.id === cmd.id && a.estado === 'recusado'), 'repetição recusada');
   assert.equal(rep1.motivo, 'repetido');
   await c1.parar();
-  assert.deepEqual(processosCom(`--name=qa-repeticao`), [], 'nenhum filho ficou vivo');
+  // Rodada de correção 2 (R7/Q3): procura pelo caminho do registro, que é único desta execução (vai no
+  // argv do filho), e não pelo nome da sessão, que outra execução do mesmo teste também usa.
+  assert.deepEqual(processosCom(amb.registro), [], 'nenhum filho ficou vivo');
 
   // Reinício do coletor: novo `rodar` com a mesma pasta de estado, e o painel (Redis) devolve o mesmo comando.
   const painel2 = await painelFalso(t, amb.token);
