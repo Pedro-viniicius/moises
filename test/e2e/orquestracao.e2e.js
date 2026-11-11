@@ -147,10 +147,17 @@ async function main() {
 
   let chave = null;
   const sessao = async () => (await estado()).retrato?.sessoes.find((s) => s.chave === chave) || null;
-  const sessaoEm = (pred, descricao, ms) => ate(descricao, async () => {
-    const s = await sessao();
-    return s && pred(s) ? s : null;
-  }, ms);
+  const sessaoEm = (pred, descricao, ms) => {
+    let visto = 'sessão ausente do painel';
+    return ate(descricao, async () => {
+      const s = await sessao();
+      if (s) {
+        const pedidos = (s.permissoes || []).map((p) => `${p.ferramenta}${p.sensivel ? ' sensível' : ''}${p.completo ? '' : ' incompleto'}: ${JSON.stringify(String(p.entrada).slice(0, 80))}`);
+        visto = `último estado visto: ${s.estado}; pedidos: ${pedidos.length ? pedidos.join(' | ') : 'nenhum'}`;
+      }
+      return s && pred(s) ? s : null;
+    }, ms, () => visto);
+  };
   // O que o cartão mostra agora: vai assinado em todo comando sobre a sessão.
   const visto = async () => {
     const s = await sessao();
@@ -281,8 +288,11 @@ async function main() {
   });
 
   await item(5, 'interromper e encerrar', async () => {
-    await mensagem('Rode com a ferramenta Bash: sleep 45');
-    const p = await pedidoDePermissao('sleep 45');
+    // Comando longo que pede permissão e não é sensível. `sleep` não serve: sozinho, o Claude Code roda sem
+    // pedir; seguido de outro comando em primeiro plano, ele bloqueia. Gravar um arquivo faz pedir.
+    const longo = path.basename(arquivo('longo'));
+    await mensagem(`Rode com a ferramenta Bash, num comando só e em primeiro plano: ping -c 45 127.0.0.1 > ${longo}`);
+    const p = await pedidoDePermissao('ping -c 45');
     await comandoFeito(await responder(p, 'aprovar'));
     await sessaoEm((x) => x.estado === 'trabalhando', 'sessão trabalhando no comando longo', 30_000);
     await espera(2000);
