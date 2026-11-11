@@ -10,6 +10,7 @@ export function instalarRedisFalso() {
       case 'INCR': { const v = Number(db.get(a[0]) || 0) + 1; db.set(a[0], String(v)); return v; }
       case 'EXPIRE': return 1;
       case 'HSET': h(a[0]).set(a[1], a[2]); return 1;
+      case 'HSETNX': if (h(a[0]).has(a[1])) return 0; h(a[0]).set(a[1], a[2]); return 1;
       case 'HGET': return db.get(a[0])?.get(a[1]) ?? null;
       case 'HDEL': return db.get(a[0])?.delete(a[1]) ? 1 : 0;
       case 'HGETALL': return [...(db.get(a[0]) || new Map())].flat();

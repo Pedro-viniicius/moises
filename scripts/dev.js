@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Servidor local que imita a Vercel: public/ estático + api/*.js, com Redis em memória.
 // Uso: PORT=3800 node scripts/dev.js   (lê ~/.config/moises/vercel.env para senha e tokens)
+// Se PANEL_PASSWORD_HASH, SESSION_SECRET e MOISES_TOKEN já vêm do ambiente (teste de ponta a ponta), o arquivo não é lido.
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,13 +10,16 @@ import { fileURLToPath } from 'node:url';
 import { instalarRedisFalso } from './redis-memoria.js';
 
 const raiz = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-try {
-  for (const l of fs.readFileSync(path.join(os.homedir(), '.config/moises/vercel.env'), 'utf8').split('\n')) {
-    const i = l.indexOf('=');
-    if (i > 0) process.env[l.slice(0, i)] ??= l.slice(i + 1);
+const jaConfigurado = ['PANEL_PASSWORD_HASH', 'SESSION_SECRET', 'MOISES_TOKEN'].every((k) => process.env[k]);
+if (!jaConfigurado) {
+  try {
+    for (const l of fs.readFileSync(path.join(os.homedir(), '.config/moises/vercel.env'), 'utf8').split('\n')) {
+      const i = l.indexOf('=');
+      if (i > 0) process.env[l.slice(0, i)] ??= l.slice(i + 1);
+    }
+  } catch {
+    console.error('Rode antes: node scripts/configurar.js <url>');
   }
-} catch {
-  console.error('Rode antes: node scripts/configurar.js <url>');
 }
 instalarRedisFalso();
 const tipos = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };

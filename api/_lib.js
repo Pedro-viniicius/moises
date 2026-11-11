@@ -6,12 +6,36 @@ export const K = {
   recebidoEm: 'moises:recebidoEm',
   cmds: 'moises:cmds',
   logs: 'moises:logs',
+  painelVistoEm: 'moises:painelVistoEm',
   tentativas: (ip) => `moises:login:${ip}`,
 };
 
 const COOKIE = 'moises';
 const VALIDADE_S = 30 * 24 * 3600;
 export const EXPIRA_CMD_MS = 120_000;
+
+// ---------- Comandos ----------
+// O servidor só transporta: confere formato, nunca a assinatura (a chave fica no aparelho e no coletor).
+export const TIPOS_CMD = ['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar'];
+export const RE_CHAVE = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const MAX_PENDENTES = 20;
+
+// Hora do servidor em que o comando chegou; registros antigos só têm criadoEm.
+export const chegadaDoComando = (c) => (Number.isFinite(c.recebidoNoServidorEm) ? c.recebidoNoServidorEm : c.criadoEm);
+
+// Tira do comando o que o painel nunca pode ver de volta e o Redis não precisa mais guardar.
+export function esquecerConteudo(c) {
+  delete c.dados;
+  delete c.assinatura;
+}
+
+// Marca como expirado o pendente que passou da validade. Devolve true se mudou.
+export function expirarSeVencido(c, agora) {
+  if (c.estado !== 'pendente' || agora - chegadaDoComando(c) < EXPIRA_CMD_MS) return false;
+  c.estado = 'expirado';
+  esquecerConteudo(c);
+  return true;
+}
 
 // ---------- Redis ----------
 function credRedis() {
