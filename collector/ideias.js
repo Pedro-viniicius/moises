@@ -98,7 +98,8 @@ export class Ideias {
     this.agora = agora;
     this.tetoDia = tetoDia;
     this.ocupado = false;
-    fs.mkdirSync(this.pasta, { recursive: true });
+    // A pasta de estado também guarda comandos-vistos.json: nasce só do dono, qualquer que seja a umask.
+    fs.mkdirSync(this.pasta, { recursive: true, mode: 0o700 });
     try {
       this.d = JSON.parse(fs.readFileSync(this.arquivo, 'utf8'));
     } catch {
@@ -108,9 +109,9 @@ export class Ideias {
 
   // Grava num temporário e renomeia: um corte no meio não zera o teto diário.
   salvar() {
-    fs.mkdirSync(this.pasta, { recursive: true });
+    fs.mkdirSync(this.pasta, { recursive: true, mode: 0o700 });
     const tmp = `${this.arquivo}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.d));
+    fs.writeFileSync(tmp, JSON.stringify(this.d), { mode: 0o600 });
     fs.renameSync(tmp, this.arquivo);
   }
 

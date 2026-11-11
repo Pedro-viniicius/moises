@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { Auditoria } from '../collector/auditoria.js';
 import { Chaveiro, Porteiro, TIPOS, JANELA_MS, FOLGA_FUTURO_MS, GUARDA_IDS_MS } from '../collector/comandos.js';
+import { Ideias } from '../collector/ideias.js';
+import { executarEncerrar, reiniciarLimites } from '../collector/encerrar.js';
 import * as col from '../collector/assinatura.js';
 import * as nav from '../public/assinatura.js';
 
@@ -59,6 +61,8 @@ function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq,
   const relogio = { agora: T0 };
   const agora = () => relogio.agora;
   const audArq = auditoriaArq ?? path.join(estado, 'auditoria.jsonl');
+  // As recusas vão para um arquivo ao lado, com o mesmo nome e o sufixo -recusas (achado S21).
+  const recusasArq = path.join(path.dirname(audArq), `${path.basename(audArq, '.jsonl')}-recusas.jsonl`);
   const chaveiro = new Chaveiro({ arquivo: chavesArq });
   const auditoria = new Auditoria({ arquivo: audArq, agora, maxRecusasPorMinuto });
   const novoPorteiro = () => new Porteiro({ chaveiro, pastaEstado: estado, auditoria, agora, maxPorMinuto });
@@ -69,10 +73,14 @@ function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq,
       v: 1, kid: ap.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: relogio.agora,
       dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO }), ...campos,
     });
-  const linhas = () =>
-    fs.existsSync(audArq) ? fs.readFileSync(audArq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-  return { raiz, conf, estado, chavesArq, audArq, aps, relogio, chaveiro, auditoria, porteiro, novoPorteiro, comando, linhas };
+  // `linhas`: aceito, feito e falhou; `recusas`: o arquivo das recusas.
+  const linhas = () => lerJsonl(audArq);
+  const recusas = () => lerJsonl(recusasArq);
+  return { raiz, conf, estado, chavesArq, audArq, recusasArq, aps, relogio, chaveiro, auditoria, porteiro, novoPorteiro, comando, linhas, recusas };
 }
+
+const lerJsonl = (arq) =>
+  fs.existsSync(arq) ? fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 
 const motivo = (r) => (r.ok ? 'aceito' : r.motivo);
 const vistosEm = (estado) => JSON.parse(fs.readFileSync(path.join(estado, 'comandos-vistos.json'), 'utf8'));
@@ -145,6 +153,81 @@ test('recusa comando expirado (criado há 120 s)', (t) => {
   assert.equal(motivo(m.porteiro.conferir(agoraValido)), 'expirado');
 });
 
+test('relógio do aparelho atrasado: com a idade do servidor recente, a recusa manda acertar a hora', (t) => {
+  const m = montar(t);
+  const ATRASADO = 'O relógio do aparelho está atrasado; acerte a hora e tente de novo.';
+  // Datado 5 minutos no passado, mas o servidor diz que chegou há 2 s.
+  const atrasado = { ...m.comando({ criadoEm: T0 - 5 * 60_000 }), idadeMs: 2_000 };
+  assert.deepEqual(m.porteiro.conferir(atrasado), { ok: false, motivo: 'relogio', erro: ATRASADO });
+  // Sem idade, ou com idade que não é número finito, ou já velha: continua expirado.
+  for (const idadeMs of [undefined, null, '2000', NaN, Infinity, JANELA_MS, 10 * 60_000]) {
+    const r = m.porteiro.conferir({ ...m.comando({ criadoEm: T0 - 5 * 60_000 }), idadeMs });
+    assert.deepEqual([r.motivo, r.erro], ['expirado', 'O comando demorou mais de 2 minutos para chegar e não foi executado.'], String(idadeMs));
+  }
+  assert.equal(m.porteiro.conferir({ ...m.comando({ criadoEm: T0 - 5 * 60_000 }), idadeMs: JANELA_MS - 1 }).erro, ATRASADO);
+  // A idade não é assinada: só escolhe a mensagem. Com idade pequena, um comando válido continua
+  // aceito e um adiantado continua com o texto de adiantado.
+  assert.equal(motivo(m.porteiro.conferir({ ...m.comando(), idadeMs: 1 })), 'aceito');
+  const adiantado = m.porteiro.conferir({ ...m.comando({ criadoEm: T0 + 31_000 }), idadeMs: 1 });
+  assert.deepEqual([adiantado.motivo, adiantado.erro], ['relogio', 'O relógio do aparelho está adiantado; acerte a hora e tente de novo.']);
+  // O recusado por atraso não queima o id nem gasta o teto (nunca volta a valer) e fica na auditoria.
+  assert.ok(!(atrasado.id in vistosEm(m.estado)));
+  assert.deepEqual(m.recusas()[0], {
+    em: new Date(T0).toISOString(), id: atrasado.id, tipo: 'mensagem', sessao: SESSAO, quem: 'ab2cd3 (celular)',
+    kidInformado: 'ab2cd3', decisao: 'recusado', motivo: 'relogio', resultado: null,
+  });
+});
+
+test('porteiro e auditoria fecham para 700 a pasta de estado que já existia aberta', (t) => {
+  const m = montar(t);
+  fs.chmodSync(m.estado, 0o775);
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  assert.equal(fs.statSync(m.estado).mode & 0o777, 0o700);
+  // Só a auditoria, numa pasta própria.
+  const outra = path.join(m.raiz, 'aberta');
+  fs.mkdirSync(outra);
+  fs.chmodSync(outra, 0o755);
+  new Auditoria({ arquivo: path.join(outra, 'auditoria.jsonl'), agora: () => T0 }).registrar({ id: 'c_1', decisao: 'recusado', motivo: 'formato' });
+  assert.equal(fs.statSync(outra).mode & 0o777, 0o700);
+  // Pasta criada do zero com umask frouxa nasce 700.
+  const antiga = process.umask(0o002);
+  try {
+    const nova = path.join(m.raiz, 'nova', 'estado');
+    const p = new Porteiro({ chaveiro: m.chaveiro, pastaEstado: nova, auditoria: null, agora: () => m.relogio.agora });
+    assert.equal(motivo(p.conferir(m.comando())), 'aceito');
+    assert.equal(fs.statSync(nova).mode & 0o777, 0o700);
+  } finally {
+    process.umask(antiga);
+  }
+});
+
+test('ideias e limites do encerrar criam pasta 700 e arquivo 600, mesmo com umask frouxa', async (t) => {
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const antiga = process.umask(0o002);
+  const limitesAntes = process.env.MOISES_LIMITES_ARQ;
+  try {
+    const estado = path.join(raiz, 'estado');
+    const ideias = new Ideias({ pastaEstado: estado, chamar: async () => ({ erro: 'não usado' }), tetoDia: 0 });
+    assert.equal(fs.statSync(estado).mode & 0o777, 0o700);
+    ideias.salvar();
+    assert.equal(fs.statSync(path.join(estado, 'ideias.json')).mode & 0o777, 0o600);
+    // Limites do encerrar: um pedido antigo demais já é gravado como executado antes de ser recusado.
+    const arqLimites = path.join(raiz, 'outro', 'encerrar.json');
+    process.env.MOISES_LIMITES_ARQ = arqLimites;
+    reiniciarLimites();
+    const r = await executarEncerrar(null, { id: 'c_0000000000000001', idadeMs: -1 });
+    assert.equal(r.ok, false);
+    assert.equal(fs.statSync(path.dirname(arqLimites)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(arqLimites).mode & 0o777, 0o600);
+  } finally {
+    process.umask(antiga);
+    if (limitesAntes === undefined) delete process.env.MOISES_LIMITES_ARQ;
+    else process.env.MOISES_LIMITES_ARQ = limitesAntes;
+    reiniciarLimites();
+  }
+});
+
 test('recusa comando com data 31 s no futuro e diz que é o relógio', (t) => {
   const m = montar(t);
   const adiantado = m.comando({ criadoEm: T0 + 31_000 });
@@ -157,6 +240,112 @@ test('recusa comando com data 31 s no futuro e diz que é o relógio', (t) => {
   // O comando recusado pelo relógio não pode ser reenviado mais tarde, quando já caberia na folga.
   m.relogio.agora = T0 + 5_000;
   assert.equal(motivo(m.porteiro.conferir(adiantado)), 'repetido');
+});
+
+test('o 31º comando com data no futuro é recusado por ritmo', (t) => {
+  const m = montar(t);
+  for (let i = 0; i < 30; i++) {
+    m.relogio.agora = T0 + i * 1_000;
+    assert.equal(motivo(m.porteiro.conferir(m.comando({ criadoEm: m.relogio.agora + 31_000 }))), 'relogio', `nº ${i + 1}`);
+  }
+  m.relogio.agora = T0 + 59_000;
+  const r = m.porteiro.conferir(m.comando({ criadoEm: T0 + 10 * 365 * 86_400_000 }));
+  assert.deepEqual([r.ok, r.motivo], [false, 'ritmo']);
+  // As recusas por relógio gastaram o teto: um comando válido no mesmo minuto também espera.
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'ritmo');
+  // Um minuto depois do primeiro, abre uma vaga.
+  m.relogio.agora = T0 + 60_000;
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+});
+
+const HORIZONTE_MS = 24 * 3_600_000; // guarda máxima de um id com data no futuro, além de GUARDA_IDS_MS
+
+test('id com data muito no futuro não faz o arquivo de vistos crescer sem limite', (t) => {
+  const m = montar(t, { maxPorMinuto: 10_000 });
+  const longe = T0 + 100 * 365 * 86_400_000; // cem anos à frente
+  const adiantados = [];
+  for (let i = 0; i < 50; i++) {
+    const c = m.comando({ criadoEm: longe + i });
+    adiantados.push(c);
+    assert.equal(motivo(m.porteiro.conferir(c)), 'relogio');
+  }
+  // Guardado até o horizonte de 24 h depois da chegada, não até a data do comando.
+  const vistos = vistosEm(m.estado);
+  assert.equal(Object.keys(vistos).length, 50);
+  for (const c of adiantados) assert.equal(vistos[c.id], T0 + HORIZONTE_MS);
+  // Passada só a guarda, eles continuam.
+  m.relogio.agora = T0 + GUARDA_IDS_MS + 1;
+  const meio = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(meio)), 'aceito');
+  assert.equal(Object.keys(vistosEm(m.estado)).length, 51);
+  // Passados o horizonte e a guarda, a próxima gravação poda todos eles.
+  m.relogio.agora = T0 + HORIZONTE_MS + GUARDA_IDS_MS + 1;
+  const novo = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(novo)), 'aceito');
+  assert.deepEqual(Object.keys(vistosEm(m.estado)), [novo.id]);
+  // Reenviado depois da poda, continua recusado pelo relógio e volta a ser guardado pelo horizonte.
+  assert.equal(motivo(m.novoPorteiro().conferir(adiantados[0])), 'relogio');
+  assert.deepEqual(vistosEm(m.estado), { [novo.id]: novo.criadoEm, [adiantados[0].id]: m.relogio.agora + HORIZONTE_MS });
+});
+
+test('comando datado 10 min no futuro, recusado, não é aceito quando o relógio alcança a data', (t) => {
+  const m = montar(t);
+  const adiantado = m.comando({ criadoEm: T0 + 10 * 60_000 });
+  assert.equal(motivo(m.porteiro.conferir(adiantado)), 'relogio');
+  // Guardado pela própria data, que está dentro do horizonte.
+  assert.equal(vistosEm(m.estado)[adiantado.id], T0 + 10 * 60_000);
+  // O relógio avança minuto a minuto; a cada passo um comando novo regrava (e poda) o arquivo.
+  for (let min = 1; min <= 10; min++) {
+    m.relogio.agora = T0 + min * 60_000 + 1;
+    assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito', `minuto ${min}`);
+  }
+  // A data chegou: o comando cabe na validade, mas já tinha sido visto.
+  assert.ok(adiantado.id in vistosEm(m.estado));
+  assert.equal(motivo(m.porteiro.conferir(adiantado)), 'repetido');
+  // Também depois de reiniciar o porteiro, até o fim da validade dele.
+  for (const passo of [0, 60_000, JANELA_MS - 2]) {
+    m.relogio.agora = T0 + 10 * 60_000 + passo;
+    assert.equal(motivo(m.novoPorteiro().conferir(adiantado)), 'repetido', `passo ${passo}`);
+  }
+  m.relogio.agora = T0 + 10 * 60_000 + JANELA_MS;
+  assert.equal(motivo(m.novoPorteiro().conferir(adiantado)), 'expirado');
+});
+
+test('arquivo de vistos antigo com data além do horizonte é trazido para o teto', (t) => {
+  const m = montar(t);
+  const arq = path.join(m.estado, 'comandos-vistos.json');
+  const longe = 'c_00000000000000aa';
+  const perto = 'c_00000000000000bb';
+  // Formato anterior: o id recusado pelo relógio ficava guardado com a data do comando (cem anos).
+  fs.writeFileSync(arq, JSON.stringify({ [longe]: T0 + 100 * 365 * 86_400_000, [perto]: T0 + 3_600_000 }), { mode: 0o600 });
+  const p = m.novoPorteiro();
+  assert.equal(motivo(p.conferir(m.comando())), 'aceito');
+  const vistos = vistosEm(m.estado);
+  assert.equal(vistos[longe], T0 + HORIZONTE_MS);
+  assert.equal(vistos[perto], T0 + 3_600_000, 'dentro do horizonte fica como está');
+  m.relogio.agora = T0 + HORIZONTE_MS + GUARDA_IDS_MS + 1;
+  assert.equal(motivo(p.conferir(m.comando())), 'aceito');
+  assert.ok(!(longe in vistosEm(m.estado)));
+});
+
+test('id já visto com data no futuro não regrava o arquivo de vistos nem gasta o teto', (t) => {
+  const m = montar(t, { maxPorMinuto: 2 });
+  const adiantado = m.comando({ criadoEm: T0 + 31_000 });
+  assert.equal(motivo(m.porteiro.conferir(adiantado)), 'relogio');
+  const arq = path.join(m.estado, 'comandos-vistos.json');
+  const antes = fs.statSync(arq, { bigint: true });
+  for (let i = 0; i < 5; i++) {
+    m.relogio.agora = T0 + i * 100;
+    assert.equal(motivo(m.porteiro.conferir(structuredClone(adiantado))), 'relogio');
+  }
+  const depois = fs.statSync(arq, { bigint: true });
+  // A gravação é por temporário e rename: arquivo regravado teria outro inode.
+  assert.equal(depois.ino, antes.ino);
+  assert.equal(depois.mtimeNs, antes.mtimeNs);
+  assert.deepEqual(vistosEm(m.estado), { [adiantado.id]: T0 + 31_000 });
+  // As cinco repetições não gastaram o teto de 2: ainda cabe um comando válido.
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'ritmo');
 });
 
 test('aceita uma vez e recusa o mesmo comando repetido', async (t) => {
@@ -237,7 +426,7 @@ test('se o arquivo de vistos não puder ser gravado, o comando é recusado', (t)
     assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
     // Falha fechada: o mesmo comando não passa nem na segunda tentativa.
     assert.equal(motivo(m.porteiro.conferir(cmd)), 'repetido');
-    const [ultima] = m.linhas().slice(-2);
+    const [ultima] = m.recusas().slice(-2);
     assert.equal(ultima.decisao, 'recusado');
     assert.equal(ultima.motivo, 'interno');
   } finally {
@@ -527,7 +716,9 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
     [m.comando({ dados: '[]' }), 'formato'],
   ];
   for (const [cmd, esperado] of casos) assert.equal(motivo(m.porteiro.conferir(cmd)), esperado);
-  const linhas = m.linhas();
+  // As recusas ficam no arquivo próprio; o dos aceitos nem é criado.
+  assert.deepEqual(m.linhas(), []);
+  const linhas = m.recusas();
   assert.equal(linhas.length, casos.length);
   linhas.forEach((l, i) => {
     assert.equal(l.decisao, 'recusado');
@@ -535,15 +726,24 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
     assert.equal(l.id, casos[i][0].id);
     assert.equal(l.tipo, casos[i][0].tipo);
     assert.equal(l.em, new Date(T0).toISOString());
+    assert.deepEqual(Object.keys(l), ['em', 'id', 'tipo', 'sessao', 'quem', 'kidInformado', 'decisao', 'motivo', 'resultado']);
   });
-  // Antes da assinatura conferir, `quem` é só o kid que o comando diz ter; depois, kid e rótulo.
-  assert.equal(linhas[4].quem, 'ab2cd3');
+  // Antes da assinatura conferir, `quem` é nulo e o kid que o comando diz ter vai em `kidInformado`;
+  // depois, `quem` é kid e rótulo.
+  for (const i of [0, 1, 2, 3, 4]) assert.equal(linhas[i].quem, null, casos[i][1]);
+  assert.equal(linhas[3].kidInformado, 'qqqqqq');
+  assert.equal(linhas[4].kidInformado, 'ab2cd3');
   assert.equal(linhas[6].quem, 'ab2cd3 (celular)');
+  assert.equal(linhas[6].kidInformado, 'ab2cd3');
+  // kid fora do formato não vai nem para `kidInformado`.
+  m.porteiro.conferir(m.comando({ kid: 'AB2CD3' }));
+  m.porteiro.conferir({ ...m.comando(), kid: `ab\n${'x'.repeat(100)}`, assinatura: undefined });
+  assert.deepEqual(m.recusas().slice(-2).map((l) => [l.motivo, l.quem, l.kidInformado]), [['formato', null, null], ['sem_credencial', null, null]]);
   // Comando que nem é objeto também deixa linha, sem lançar.
   m.porteiro.conferir(null);
   assert.deepEqual(
-    (({ em, ...resto }) => resto)(m.linhas().at(-1)),
-    { id: null, tipo: null, sessao: null, quem: null, decisao: 'recusado', motivo: 'sem_credencial', resultado: null },
+    (({ em, ...resto }) => resto)(m.recusas().at(-1)),
+    { id: null, tipo: null, sessao: null, quem: null, kidInformado: null, decisao: 'recusado', motivo: 'sem_credencial', resultado: null },
   );
   // Repetido e ritmo também.
   const n = montar(t, { maxPorMinuto: 1 });
@@ -551,7 +751,74 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
   n.porteiro.conferir(um);
   n.porteiro.conferir(um);
   n.porteiro.conferir(n.comando());
-  assert.deepEqual(n.linhas().map((l) => l.motivo), [null, 'repetido', 'ritmo']);
+  assert.deepEqual(n.linhas().map((l) => l.decisao), ['aceito']);
+  assert.deepEqual(n.recusas().map((l) => [l.motivo, l.quem]), [['repetido', 'ab2cd3 (celular)'], ['ritmo', 'ab2cd3 (celular)']]);
+});
+
+test('recusas em massa não empurram os aceitos para fora da auditoria', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const m = montar(t);
+  // Auditoria com arquivos pequenos e sem teto de recusas, para girar logo.
+  const arq = path.join(raiz, 'auditoria.jsonl');
+  const aud = new Auditoria({ arquivo: arq, agora: () => m.relogio.agora, maxBytes: 2_000, maxRecusasPorMinuto: 10_000 });
+  const p = new Porteiro({ chaveiro: m.chaveiro, pastaEstado: m.estado, auditoria: aud, agora: () => m.relogio.agora });
+  const aceito = m.comando();
+  assert.equal(motivo(p.conferir(aceito)), 'aceito');
+  for (let i = 0; i < 200; i++) p.conferir({ ...m.comando(), assinatura: 'A'.repeat(43) });
+  const recusasArq = path.join(raiz, 'auditoria-recusas.jsonl');
+  // O arquivo das recusas girou sozinho; o dos aceitos continua com o aceito.
+  assert.ok(fs.existsSync(`${recusasArq}.1`));
+  assert.ok(!fs.existsSync(`${arq}.1`));
+  assert.deepEqual(lerJsonl(arq).map((l) => [l.id, l.decisao]), [[aceito.id, 'aceito']]);
+  assert.ok(lerJsonl(recusasArq).every((l) => l.decisao === 'recusado'));
+  for (const a of [arq, recusasArq, `${recusasArq}.1`]) assert.equal(fs.statSync(a).mode & 0o777, 0o600, a);
+  // O arquivo de recusas pode ser dado explicitamente.
+  const outro = path.join(raiz, 'outro', 'r.jsonl');
+  const aud2 = new Auditoria({ arquivo: path.join(raiz, 'outro', 'a.jsonl'), arquivoRecusas: outro, agora: () => T0 });
+  aud2.registrar({ id: 'c_1', decisao: 'recusado', motivo: 'formato' });
+  assert.equal(lerJsonl(outro).length, 1);
+});
+
+test('desligar e religar o porteiro', (t) => {
+  const m = montar(t);
+  assert.deepEqual(m.porteiro.ativo(), { ativa: true, motivo: null });
+  m.porteiro.desligar('painel_alterado');
+  assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'painel_alterado' });
+  const cmd = m.comando();
+  const r = m.porteiro.conferir(cmd);
+  assert.deepEqual(r, { ok: false, motivo: 'painel_alterado', erro: 'O painel publicado é diferente do código deste computador; comandos desligados.' });
+  // Auditado, e o id não foi queimado.
+  assert.deepEqual(m.recusas().map((l) => [l.id, l.motivo]), [[cmd.id, 'painel_alterado']]);
+  assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
+  // MOISES_COMANDOS=0 vem antes do motivo de desligar.
+  process.env.MOISES_COMANDOS = '0';
+  try {
+    assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'desligado' });
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'desligado');
+  } finally {
+    delete process.env.MOISES_COMANDOS;
+  }
+  // Desligado vale antes de sem_chave.
+  fs.renameSync(m.chavesArq, `${m.chavesArq}.fora`);
+  assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'painel_alterado' });
+  fs.renameSync(`${m.chavesArq}.fora`, m.chavesArq);
+  // Motivo fora do formato ainda desliga (falha fechada), com o motivo genérico.
+  for (const ruim of ['Painel', 'x'.repeat(21), '', null, 7, 'a b']) {
+    m.porteiro.religar();
+    m.porteiro.desligar(ruim);
+    assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'desligado' }, String(ruim));
+  }
+  // Motivo válido sem texto próprio usa o texto de desligado (inclusive nomes do protótipo).
+  for (const m2 of ['outro_motivo', '__proto__', 'constructor']) {
+    m.porteiro.desligar(m2);
+    assert.deepEqual(m.porteiro.conferir(m.comando()), { ok: false, motivo: m2, erro: 'Os comandos pelo painel estão desligados neste computador.' });
+  }
+  // Religado, o mesmo comando passa.
+  m.porteiro.religar();
+  assert.deepEqual(m.porteiro.ativo(), { ativa: true, motivo: null });
+  assert.equal(motivo(m.porteiro.conferir(cmd)), 'aceito');
 });
 
 test('a auditoria não contém o texto da mensagem', (t) => {
@@ -562,8 +829,9 @@ test('a auditoria não contém o texto da mensagem', (t) => {
   m.porteiro.conferir(m.comando({ tipo: 'abrir', chave: null, dados: JSON.stringify({ projeto: 'moises', pedido: MSG_SECRETA }) }));
   m.porteiro.conferir(m.comando({ dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO, extra: 1 }) }));
   m.porteiro.conferir({ ...m.comando(), assinatura: 'A'.repeat(43) });
-  const bruto = fs.readFileSync(m.audArq, 'utf8');
-  assert.equal(m.linhas().length, 5);
+  const bruto = fs.readFileSync(m.audArq, 'utf8') + fs.readFileSync(m.recusasArq, 'utf8');
+  assert.equal(m.linhas().length, 3);
+  assert.equal(m.recusas().length, 2);
   assert.ok(!bruto.includes(MSG_SECRETA));
   assert.ok(!bruto.includes('"dados"'));
   assert.ok(!bruto.includes(aceito.assinatura));
@@ -580,13 +848,15 @@ test('a auditoria não contém o texto da mensagem', (t) => {
   assert.equal(l.sessao, '7');
   assert.equal(l.quem, 'kid (rótulo falso)');
   assert.equal(l.resultado, 'y'.repeat(80));
-  assert.equal(fs.readFileSync(m.audArq, 'utf8').split('\n').filter(Boolean).length, 6);
+  assert.equal(fs.readFileSync(m.audArq, 'utf8').split('\n').filter(Boolean).length, 4);
 });
 
 test('o arquivo de auditoria tem permissão 600', (t) => {
   const m = montar(t);
   m.porteiro.conferir(m.comando());
+  m.porteiro.conferir(m.comando({ v: 2 }));
   assert.equal(fs.statSync(m.audArq).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(m.recusasArq).mode & 0o777, 0o600);
   // Mesmo com umask permissiva e com um arquivo antigo aberto demais.
   const antiga = process.umask(0);
   try {
@@ -621,7 +891,22 @@ test('concluir registra feito ou falhou', (t) => {
   assert.equal(falhou.id, b.id);
   assert.equal(falhou.tipo, 'interromper');
   assert.equal(falhou.quem, 'xy7zw8 (tablet)');
-  assert.equal(falhou.resultado, 'A sessão mudou desde que você abriu o painel; atualize e tente de novo.'.slice(0, 80));
+  // Só a primeira frase do erro (até o primeiro ponto, dois-pontos ou quebra de linha).
+  assert.equal(falhou.resultado, 'A sessão mudou desde que você abriu o painel; atualize e tente de novo');
+  // Fim do stderr de um processo: nada depois da primeira frase vai para a auditoria.
+  const casos = [
+    ['O Claude Code parou com erro: /home/dono/projeto/segredo.txt não encontrado', 'O Claude Code parou com erro'],
+    ['Falha ao abrir\nTraceback em /home/dono/.ssh/id_ed25519', 'Falha ao abrir'],
+    [`${'palavra '.repeat(30)}. resto`, 'palavra '.repeat(10)],
+    ['. começa com ponto', null],
+    ['  espaços antes: resto', 'espaços antes'],
+  ];
+  for (const [erro, esperado] of casos) {
+    m.porteiro.concluir(a, { ok: false, erro });
+    const r = m.linhas().at(-1).resultado;
+    assert.equal(r, esperado === null ? null : esperado.slice(0, 80).trimEnd(), erro);
+    if (r) assert.ok(r.length <= 80);
+  }
   // Falhou sem erro e entradas estranhas não lançam.
   m.porteiro.concluir(a, { ok: false });
   assert.equal(m.linhas().at(-1).decisao, 'falhou');
@@ -632,6 +917,22 @@ test('concluir registra feito ou falhou', (t) => {
   assert.ok(!fs.readFileSync(m.audArq, 'utf8').includes(MSG_SECRETA));
 });
 
+test('concluir de um abrir bem-sucedido registra a sessão criada', (t) => {
+  const m = montar(t);
+  const NOVA = 'principal:0f0e0d0c-0b0a-4908-8706-050403020100';
+  const abrir = m.comando({ tipo: 'abrir', chave: null, dados: JSON.stringify({ projeto: 'moises', pedido: 'p' }) });
+  assert.equal(m.porteiro.conferir(abrir).ok, true);
+  m.porteiro.concluir(abrir, { ok: true, chaveNova: NOVA });
+  assert.deepEqual(m.linhas().map((l) => [l.decisao, l.sessao]), [['aceito', null], ['feito', NOVA]]);
+  // Falhou não tem sessão criada; chave fora do formato não entra; outros verbos mantêm a própria chave.
+  m.porteiro.concluir(abrir, { ok: false, erro: 'x', chaveNova: NOVA });
+  m.porteiro.concluir(abrir, { ok: true, chaveNova: 'principal:nao-e-uuid\n' });
+  m.porteiro.concluir(abrir, { ok: true });
+  const msg = m.comando();
+  m.porteiro.concluir(msg, { ok: true, chaveNova: NOVA });
+  assert.deepEqual(m.linhas().slice(2).map((l) => [l.decisao, l.sessao]), [['falhou', null], ['feito', null], ['feito', null], ['feito', SESSAO]]);
+});
+
 test('auditoria gira o arquivo ao passar do limite', (t) => {
   const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
   t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
@@ -639,6 +940,10 @@ test('auditoria gira o arquivo ao passar do limite', (t) => {
   const aud = new Auditoria({ arquivo: arq, agora: () => T0, maxBytes: 600 });
   const registrar = (i) => aud.registrar({ id: `c_${String(i).padStart(16, '0')}`, tipo: 'mensagem', chave: SESSAO, quem: 'ab2cd3 (celular)', decisao: 'aceito' });
   for (let i = 0; i < 30; i++) registrar(i);
+  // Uma recusa vai para o próprio arquivo e não gira o dos aceitos.
+  aud.registrar({ id: 'c_r', decisao: 'recusado', motivo: 'formato' });
+  assert.ok(!fs.existsSync(path.join(raiz, 'auditoria-recusas.jsonl.1')));
+  assert.equal(fs.readFileSync(path.join(raiz, 'auditoria-recusas.jsonl'), 'utf8').split('\n').filter(Boolean).length, 1);
   const ids = (a) => fs.readFileSync(a, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).id);
   assert.ok(fs.existsSync(`${arq}.1`));
   assert.ok(fs.statSync(arq).size <= 600);
@@ -658,33 +963,38 @@ test('recusas em excesso viram uma linha de resumo', (t) => {
   const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
   t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
   const arq = path.join(raiz, 'auditoria.jsonl');
+  const arqRecusas = path.join(raiz, 'auditoria-recusas.jsonl');
   let agora = T0;
   const aud = new Auditoria({ arquivo: arq, agora: () => agora });
-  const linhas = () => fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  const recusar = (i) => aud.registrar({ id: `c_${i}`, tipo: 'mensagem', chave: null, quem: null, decisao: 'recusado', motivo: 'assinatura' });
+  const recusar = (i, mot = 'assinatura') => aud.registrar({ id: `c_${i}`, tipo: 'mensagem', chave: null, quem: null, decisao: 'recusado', motivo: mot });
   for (let i = 0; i < 25; i++) {
     agora = T0 + i * 1_000;
-    recusar(i);
+    recusar(i, i < 22 ? 'assinatura' : 'formato');
   }
   // Aceitos nunca são suprimidos.
   aud.registrar({ id: 'c_ok', tipo: 'mensagem', chave: null, quem: 'k', decisao: 'aceito' });
-  assert.equal(linhas().length, 21);
-  assert.equal(linhas().filter((l) => l.decisao === 'recusado').length, 20);
-  // Na primeira chamada do minuto seguinte sai o resumo, e depois a linha nova.
+  assert.deepEqual(lerJsonl(arq).map((l) => l.id), ['c_ok']);
+  assert.equal(lerJsonl(arqRecusas).length, 20);
+  // Na primeira chamada do minuto seguinte sai o resumo, com a contagem por motivo, e depois a linha nova.
   agora = T0 + 61_000;
   recusar(99);
-  const fim = linhas().slice(-2);
-  assert.deepEqual(fim[0], { em: new Date(T0 + 61_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '5 recusas' });
+  const fim = lerJsonl(arqRecusas).slice(-2);
+  assert.deepEqual(fim[0], {
+    em: new Date(T0 + 61_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '5 recusas',
+    porMotivo: { assinatura: 2, formato: 3 },
+  });
   assert.equal(fim[1].id, 'c_99');
-  // O limite é por minuto e configurável.
+  // O limite é por minuto e configurável; motivo fora do formato conta como "outro".
   const arq2 = path.join(raiz, 'outra.jsonl');
   const aud2 = new Auditoria({ arquivo: arq2, agora: () => agora, maxRecusasPorMinuto: 2 });
-  for (let i = 0; i < 5; i++) aud2.registrar({ id: `c_${i}`, decisao: 'recusado', motivo: 'formato' });
+  for (let i = 0; i < 5; i++) aud2.registrar({ id: `c_${i}`, decisao: 'recusado', motivo: i === 4 ? 'Motivo\nestranho' : 'formato' });
   agora += 60_000;
   aud2.registrar({ id: 'c_x', decisao: 'aceito' });
-  const l2 = fs.readFileSync(arq2, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  assert.deepEqual(l2.map((l) => l.motivo ?? null), ['formato', 'formato', 'suprimidas', null]);
+  const l2 = lerJsonl(path.join(raiz, 'outra-recusas.jsonl'));
+  assert.deepEqual(l2.map((l) => l.motivo), ['formato', 'formato', 'suprimidas']);
   assert.equal(l2[2].resultado, '3 recusas');
+  assert.deepEqual(l2[2].porMotivo, { formato: 2, outro: 1 });
+  assert.deepEqual(lerJsonl(arq2).map((l) => l.id), ['c_x']);
 });
 
 test('auditoria nunca lança, nem quando não consegue gravar', (t) => {
@@ -692,8 +1002,11 @@ test('auditoria nunca lança, nem quando não consegue gravar', (t) => {
   const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
   t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
   // O "arquivo" é uma pasta: a gravação falha.
-  const aud = new Auditoria({ arquivo: raiz, agora: () => T0 });
+  const pasta = path.join(raiz, 'sou-pasta');
+  fs.mkdirSync(pasta);
+  const aud = new Auditoria({ arquivo: pasta, arquivoRecusas: pasta, agora: () => T0 });
   assert.doesNotThrow(() => aud.registrar({ id: 'c_1', decisao: 'aceito', quem: MSG_SECRETA }));
+  assert.doesNotThrow(() => aud.registrar({ id: 'c_1', decisao: 'recusado', motivo: 'formato', quem: MSG_SECRETA }));
   assert.doesNotThrow(() => aud.registrar(null));
   assert.doesNotThrow(() => aud.registrar());
   const quebrado = new Auditoria({ arquivo: path.join(raiz, 'a.jsonl'), agora: () => { throw new Error('relógio'); } });
@@ -736,20 +1049,25 @@ test('descarregar grava na hora o resumo das recusas suprimidas', (t) => {
   t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
   const arq = path.join(raiz, 'auditoria.jsonl');
   const aud = new Auditoria({ arquivo: arq, agora: () => T0 + 5_000, maxRecusasPorMinuto: 2 });
-  const linhas = () => fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const linhas = () => lerJsonl(path.join(raiz, 'auditoria-recusas.jsonl'));
   for (let i = 0; i < 6; i++) aud.registrar({ id: `c_${i}`, decisao: 'recusado', motivo: 'assinatura' });
   assert.equal(linhas().length, 2);
   // Sem esperar a virada do minuto (é o que parar() faz ao encerrar o coletor).
   aud.descarregar();
-  assert.deepEqual(linhas().at(-1), { em: new Date(T0 + 5_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '4 recusas' });
+  assert.deepEqual(linhas().at(-1), {
+    em: new Date(T0 + 5_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '4 recusas', porMotivo: { assinatura: 4 },
+  });
   // Chamar de novo sem nada suprimido não grava outra linha, e o resumo não sai duas vezes.
   aud.descarregar();
   aud.registrar({ id: 'c_ok', decisao: 'aceito' });
-  assert.equal(linhas().length, 4);
+  assert.equal(linhas().length, 3);
   assert.equal(linhas().filter((l) => l.motivo === 'suprimidas').length, 1);
+  assert.deepEqual(lerJsonl(arq).map((l) => l.id), ['c_ok']);
   // Nunca lança, nem sem conseguir gravar (o "arquivo" é uma pasta).
   t.mock.method(console, 'error', () => {});
-  const quebrada = new Auditoria({ arquivo: raiz, agora: () => T0, maxRecusasPorMinuto: 0 });
+  const pasta = path.join(raiz, 'sou-pasta');
+  fs.mkdirSync(pasta);
+  const quebrada = new Auditoria({ arquivo: pasta, arquivoRecusas: pasta, agora: () => T0, maxRecusasPorMinuto: 0 });
   quebrada.registrar({ id: 'c_1', decisao: 'recusado', motivo: 'formato' });
   assert.doesNotThrow(() => quebrada.descarregar());
 });

@@ -1,12 +1,13 @@
 // Canal de comandos do painel, do lado do coletor: o Chaveiro guarda as chaves de cada aparelho
 // autorizado e o Porteiro decide se um comando é aceito. É o ponto de decisão de segurança: o
 // servidor e o Redis só transportam, e nada que venha deles é executado sem passar por aqui.
-// Contrato e ordem das conferências no PLANO ("Contrato comum" e tarefa 3); o porquê em ACHADOS
+// Contrato e ordem das conferências no PLANO ("Contrato comum", tarefas 3 e 12); o porquê em ACHADOS
 // (S5: ordem fixa, id gravado antes de executar, poda só por tempo; S7: formato antes da
-// assinatura; S11: teto por minuto só para assinatura válida).
+// assinatura; S11: teto por minuto só para assinatura válida; R1: data no futuro também gasta o teto).
 import fs from 'node:fs';
 import path from 'node:path';
 import { assinaturaConfere } from './assinatura.js';
+import { pastaSoDoDono } from './auditoria.js';
 
 export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
 export const JANELA_MS = 120_000;
@@ -14,6 +15,10 @@ export const FOLGA_FUTURO_MS = 30_000;
 export const GUARDA_IDS_MS = 600_000;
 
 const MINUTO_MS = 60_000;
+// Um id com data no futuro fica guardado até a própria data (mais a guarda), para não voltar a valer
+// quando o relógio a alcançar, mas no máximo até 24 h depois da chegada: o arquivo não cresce sem
+// limite. Resto aceito (R1): aparelho com relógio adiantado mais de 24 h.
+const HORIZONTE_FUTURO_MS = 24 * 3_600_000;
 const ARQ_VISTOS = 'comandos-vistos.json';
 const MAX_DADOS = 8_000;
 const MAX_ROTULO = 40;
@@ -32,6 +37,8 @@ const RE_CONTA = /^[a-z0-9]{1,20}$/; // mesma regra do prefixo da chave de sess�
 const RE_NOME_SESSAO = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_HASH = /^[0-9a-f]{64}$/;
+// Motivo de `desligar` (vai no ack e na auditoria).
+const RE_MOTIVO = /^[a-z_]{1,20}$/;
 const MODELOS = ['haiku', 'sonnet', 'opus', 'fable'];
 const ESFORCOS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const MODOS = ['manual', 'acceptEdits', 'plan'];
@@ -50,7 +57,11 @@ const ERROS = {
   repetido: 'Este comando já tinha sido recebido.',
   ritmo: 'Comandos demais em pouco tempo; espere um minuto e tente de novo.',
   interno: 'Erro interno do coletor; o comando não foi executado.',
+  painel_alterado: 'O painel publicado é diferente do código deste computador; comandos desligados.',
 };
+// Mesmo motivo `relogio`, outra mensagem: o comando chegou há pouco ao servidor, mas veio datado
+// antes da janela (achado Q1).
+const ERRO_ATRASADO = 'O relógio do aparelho está atrasado; acerte a hora e tente de novo.';
 
 const objetoSimples = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const desligado = () => process.env.MOISES_COMANDOS === '0';
@@ -219,10 +230,11 @@ function dadosDoVerbo(tipo, bruto) {
 // ---------- Formato do comando ----------
 
 // Cada campo é lido uma única vez, para um getter não trocar o valor entre a conferência e o uso.
+// `idadeMs` é posto pelo servidor e não é assinado: só escolhe a mensagem de uma recusa.
 function copiarComando(cmd) {
   if (cmd === null || typeof cmd !== 'object') return null;
-  const { v, kid, id, tipo, chave, criadoEm, dados, assinatura } = cmd;
-  return { v, kid, id, tipo, chave, criadoEm, dados, assinatura };
+  const { v, kid, id, tipo, chave, criadoEm, dados, assinatura, idadeMs } = cmd;
+  return { v, kid, id, tipo, chave, criadoEm, dados, assinatura, idadeMs };
 }
 
 // Tabela do "Contrato comum". A chave de sessão é conferida aqui, por verbo, porque null e ''
@@ -256,30 +268,45 @@ export class Porteiro {
     this.agora = agora;
     this.maxPorMinuto = maxPorMinuto;
     this.arqVistos = path.join(pastaEstado, ARQ_VISTOS);
-    this.vistos = new Map(); // id → criadoEm
+    // id → instante que conta para a poda (sai GUARDA_IDS_MS depois dele): `criadoEm` dos comandos na
+    // validade; nos recusados por data no futuro, `criadoEm` limitado à chegada + 24 h (achado R1).
+    this.vistos = new Map();
     this.recentes = []; // instantes dos comandos válidos que entraram no teto por minuto
     // Instante da construção quando o arquivo de vistos existia mas não pôde ser lido: sem ele não há
     // como saber se um comando criado antes disso já rodou, e todos esses são recusados (falha fechada).
     this.recusarAntesDe = null;
+    // Motivo posto por `desligar` (ex.: `painel_alterado`); null quando ligado.
+    this.motivoDesligado = null;
     this.#lerVistos();
   }
 
   ativo() {
     if (desligado()) return { ativa: false, motivo: 'desligado' };
+    if (this.motivoDesligado !== null) return { ativa: false, motivo: this.motivoDesligado };
     if (this.chaveiro.aparelhos().length === 0) return { ativa: false, motivo: 'sem_chave' };
     return { ativa: true, motivo: null };
   }
 
-  // Decide se o comando é aceito, nesta ordem (PLANO, tarefa 3). Cada decisão vira uma linha na
-  // auditoria. Nunca lança: qualquer erro inesperado é recusa com motivo `interno`.
+  // Desliga os comandos até `religar()` (o laço chama quando o painel publicado diverge do código
+  // local, achado S15). Motivo fora do formato ainda desliga, com o motivo genérico `desligado`.
+  desligar(motivo) {
+    this.motivoDesligado = typeof motivo === 'string' && RE_MOTIVO.test(motivo) ? motivo : 'desligado';
+  }
+
+  religar() {
+    this.motivoDesligado = null;
+  }
+
+  // Decide se o comando é aceito, nesta ordem (PLANO, tarefas 3 e 12). Cada decisão vira uma linha
+  // na auditoria. Nunca lança: qualquer erro inesperado é recusa com motivo `interno`.
   conferir(cmd) {
     let c = null;
-    let quem = null;
-    const recusa = (motivo) => this.#recusar(c, quem, motivo);
+    let quem = null; // só depois da assinatura conferir (achado A5)
+    const recusa = (motivo, erro) => this.#recusar(c, quem, motivo, erro);
     try {
       c = copiarComando(cmd);
-      quem = c && typeof c.kid === 'string' ? c.kid : null; // ainda não confirmado pela assinatura
       if (desligado()) return recusa('desligado');
+      if (this.motivoDesligado !== null) return recusa(this.motivoDesligado);
       if (this.chaveiro.aparelhos().length === 0) return recusa('sem_chave');
       if (!c || c.assinatura === undefined || c.assinatura === null || c.assinatura === '') return recusa('sem_credencial');
       if (!formatoConfere(c)) return recusa('formato');
@@ -290,12 +317,22 @@ export class Porteiro {
       quem = `${c.kid} (${ap.rotulo})`;
 
       const agora = this.agora();
-      if (agora - c.criadoEm >= JANELA_MS) return recusa('expirado');
+      if (agora - c.criadoEm >= JANELA_MS) {
+        // Chegou há pouco ao servidor mas veio datado antes da janela: é o relógio do aparelho. A
+        // idade não é assinada, então só muda a mensagem; expirado nunca volta a valer e não é guardado.
+        const recente = Number.isFinite(c.idadeMs) && c.idadeMs < JANELA_MS;
+        return recente ? recusa('relogio', ERRO_ATRASADO) : recusa('expirado');
+      }
       if (c.criadoEm - agora > FOLGA_FUTURO_MS) {
-        // Guardado como visto: quem copiou o comando não pode reenviá-lo quando ele couber na folga.
-        this.vistos.set(c.id, c.criadoEm);
+        // Já guardado: recusa de novo sem gastar o teto nem regravar o arquivo.
+        if (this.vistos.has(c.id)) return recusa('relogio');
+        // Guardado como visto, para quem copiou o comando não reenviá-lo quando ele couber na folga:
+        // até a data dele, limitada ao horizonte, para a poda por tempo alcançá-lo. Passa pelo teto
+        // por minuto (só assinatura válida chega aqui), que limita o crescimento junto com o horizonte.
+        this.vistos.set(c.id, Math.max(agora, Math.min(c.criadoEm, agora + HORIZONTE_FUTURO_MS)));
+        const cabe = this.#cabeNoRitmo(agora);
         this.#gravarVistos(agora);
-        return recusa('relogio');
+        return recusa(cabe ? 'relogio' : 'ritmo');
       }
       // Registro de vistos perdido no início (PLANO, tarefa 7): o que foi criado antes pode já ter rodado.
       if (this.recusarAntesDe !== null && c.criadoEm < this.recusarAntesDe) return recusa('interno');
@@ -321,23 +358,32 @@ export class Porteiro {
     }
   }
 
-  // Registra o resultado da execução de um comando aceito. Nunca lança.
+  // Registra o resultado da execução de um comando aceito: `{ ok, erro, chaveNova }`. Num `abrir`
+  // bem-sucedido, a sessão da linha é a criada (`chaveNova`, achado R3). A auditoria guarda só a
+  // primeira frase do erro (achado S24). Nunca lança.
   concluir(cmd, fim) {
     try {
-      const c = copiarComando(cmd) ?? {};
+      const c = { ...(copiarComando(cmd) ?? {}) };
       const kid = typeof c.kid === 'string' ? c.kid : null;
       const ap = kid ? this.chaveiro.obter(kid) : null;
       const ok = fim?.ok === true;
       const erro = !ok && typeof fim?.erro === 'string' && fim.erro ? fim.erro : null;
+      if (ok && c.tipo === 'abrir') {
+        const nova = fim?.chaveNova;
+        c.chave = typeof nova === 'string' && RE_SESSAO.test(nova) ? nova : null;
+      }
       this.#auditar(c, ap ? `${kid} (${ap.rotulo})` : kid, ok ? 'feito' : 'falhou', null, erro);
     } catch (err) {
       console.error(`porteiro: não foi possível registrar a conclusão de um comando (${err?.code || err?.name || 'erro'}).`);
     }
   }
 
-  #recusar(c, quem, motivo) {
-    this.#auditar(c, quem, 'recusado', motivo);
-    return { ok: false, motivo, erro: ERROS[motivo] };
+  // A linha de recusa leva `quem` (nulo antes da assinatura) e o kid que o comando diz ter, se
+  // estiver no formato. Motivo sem texto próprio (um de `desligar`) usa o texto de desligado.
+  #recusar(c, quem, motivo, erro = Object.hasOwn(ERROS, motivo) ? ERROS[motivo] : ERROS.desligado) {
+    const kidInformado = c && typeof c.kid === 'string' && RE_KID.test(c.kid) ? c.kid : null;
+    this.auditoria?.registrar({ id: c?.id, tipo: c?.tipo, chave: c?.chave, quem, kidInformado, decisao: 'recusado', motivo });
+    return { ok: false, motivo, erro };
   }
 
   #auditar(c, quem, decisao, motivo = null, resultado = null) {
@@ -374,19 +420,22 @@ export class Porteiro {
       console.error('porteiro: o arquivo de comandos vistos é inválido; comandos anteriores a este início serão recusados.');
       return;
     }
-    for (const [id, criadoEm] of Object.entries(json)) {
-      if (RE_ID.test(id) && Number.isSafeInteger(criadoEm)) this.vistos.set(id, criadoEm);
+    // Arquivo do formato anterior podia guardar a data do comando sem limite: além do horizonte,
+    // o instante é trazido para agora + 24 h (sai, no máximo, 24 h + a guarda depois deste início).
+    const teto = this.agora() + HORIZONTE_FUTURO_MS;
+    for (const [id, instante] of Object.entries(json)) {
+      if (RE_ID.test(id) && Number.isSafeInteger(instante)) this.vistos.set(id, Math.min(instante, teto));
     }
   }
 
-  // Poda por tempo (nunca por contagem: um id só sai quando já estaria expirado) e grava por
+  // Poda por tempo (nunca por contagem: um id só sai quando já não pode valer) e grava por
   // arquivo temporário e rename. Devolve false se não conseguiu gravar.
   #gravarVistos(agora) {
-    for (const [id, criadoEm] of this.vistos) if (agora - criadoEm > GUARDA_IDS_MS) this.vistos.delete(id);
+    for (const [id, instante] of this.vistos) if (agora - instante > GUARDA_IDS_MS) this.vistos.delete(id);
     const tmp = `${this.arqVistos}.${process.pid}.tmp`;
     let fd = null;
     try {
-      fs.mkdirSync(this.pastaEstado, { recursive: true, mode: 0o700 });
+      pastaSoDoDono(this.pastaEstado);
       fd = fs.openSync(tmp, 'w', 0o600);
       fs.fchmodSync(fd, 0o600);
       fs.writeSync(fd, JSON.stringify(Object.fromEntries(this.vistos)));

@@ -55,9 +55,9 @@ export function reiniciarLimites() {
 }
 function gravarLimites() {
   try {
-    fs.mkdirSync(path.dirname(arqLimites), { recursive: true });
+    fs.mkdirSync(path.dirname(arqLimites), { recursive: true, mode: 0o700 });
     const tmp = `${arqLimites}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }));
+    fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }), { mode: 0o600 });
     fs.renameSync(tmp, arqLimites);
   } catch (err) {
     console.error('[encerrar] não gravou os limites:', err.message);
