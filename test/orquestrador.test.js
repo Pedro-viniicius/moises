@@ -659,14 +659,12 @@ test('S18: encerrar mata também os processos netos da sessão', async (t) => {
 test('S19: pedido de permissão antes de um init conferido é negado e não é publicado; result sem init encerra a sessão', async (t) => {
   const ctx = preparar(t);
   const r = await ctx.orq.executar(cmd('abrir'), { projeto: 'projeto-a', pedido: 'sem-init' });
-  // A abertura vale no primeiro evento (o pedido, negado na hora); depois, o result sem init encerra a sessão.
-  assert.equal(r.ok, true, r.erro);
-  const chave = r.chaveNova;
-  assert.deepEqual(ctx.publicada(chave).permissoes, [], 'o pedido sem init não é publicado');
-  await ate(() => ctx.publicada(chave)?.erro === ERRO_INIT, 'sessão sem init encerrar com o erro do init');
+  // Correção final (CR1): a abertura só vale com o init conferido. O pedido antes dele é negado na hora e
+  // não vale como abertura; o result sem init encerra a sessão e o próprio comando responde o erro do init.
+  assert.deepEqual(r, { ok: false, erro: ERRO_INIT });
   await ate(() => ctx.orq.abertas() === 0, 'filho morrer');
   assert.deepEqual(respostas(ctx).map((l) => l.response), [{ subtype: 'success', request_id: 'req_1', response: { behavior: 'deny', message: 'Sessão sem configuração conferida.' } }]);
-  assert.equal(ctx.publicada(chave).estado, 'encerrada');
+  assert.deepEqual(ctx.orq.aplicar(ctx.coletor.retrato()).sessoes.flatMap((s) => s.permissoes ?? []), [], 'o pedido sem init não é publicado');
 });
 
 test('S23: abrir e retomar recusam a pasta que contém o próprio coletor', async (t) => {

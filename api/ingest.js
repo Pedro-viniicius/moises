@@ -46,7 +46,10 @@ function horaDoResultado(valor, ehFim) {
 
 export default rota(['POST'], async (req, res) => {
   if (!tokenColetorValido(req)) return json(res, 401, { erro: 'Token inválido.' });
-  const { retrato, acks, protocolo } = await lerCorpo(req);
+  const corpo = await lerCorpo(req);
+  // JSON que não é objeto (null, número, texto, lista) não é um corpo do coletor: 400, antes de gravar nada.
+  if (corpo === null || typeof corpo !== 'object' || Array.isArray(corpo)) return json(res, 400, { erro: 'Corpo inválido.' });
+  const { retrato, acks, protocolo } = corpo;
   const agora = Date.now();
   // Lê o objeto antes de cmds-rec e cmds-fim: quem grava o resultado o grava antes de regravar o objeto,
   // então um objeto já sem conteúdo sempre vem com o resultado que o acompanha.

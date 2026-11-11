@@ -54,7 +54,9 @@ const RE_FERRAMENTA = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_NOME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const RE_CONTA = /^[a-z0-9]{1,20}$/;
-const RE_CHAVE = /^([a-z0-9]{1,20}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+// Chave de sessão `<conta>:<uuid>`. Também é a regex de sessão do porteiro (collector/comandos.js): sem
+// flag `g`, os grupos não mudam o resultado de `test`.
+export const RE_CHAVE = /^([a-z0-9]{1,20}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SENSIVEL = /\.config\/moises|\.local\/state\/moises|\.ssh\b|\bprintenv\b|(^|[\s;&|])env(\s|$)|\.claude\/settings|\.git\/hooks|credentials/;
 // Comando de Bash com caractere fora de ASCII imprimível (homóglifo, letra acentuada, invisível) também é sensível (S26).
 const FORA_DO_ASCII = /[^\x20-\x7E\n\t]/;
@@ -243,6 +245,7 @@ export class Orquestrador {
     esperaRetomarMs = 5000,
     esperaFimMs = 10_000,
     esperaTermMs = 5000,
+    esperaKillMs = 5000,
     kill = null,
     pastaColetor = RAIZ_COLETOR,
     protegidos = [],
@@ -279,6 +282,7 @@ export class Orquestrador {
     this.esperaRetomarMs = esperaRetomarMs;
     this.esperaFimMs = esperaFimMs;
     this.esperaTermMs = esperaTermMs;
+    this.esperaKillMs = esperaKillMs;
     this.opcoesEncerrar = kill ? { kill } : {};
     // Caminho real; se não der para resolver, o caminho absoluto como veio (a recusa continua valendo para ele).
     this.pastaColetor = pastaReal(pastaColetor) ?? path.resolve(String(pastaColetor));
@@ -350,7 +354,8 @@ export class Orquestrador {
     if (!rec) return falha(ERROS.iniciar);
     rec.modelo = modelo;
     rec.esforco = esforco;
-    // O `init` só chega depois da primeira mensagem: o pedido vai logo, e a abertura vale no primeiro evento.
+    // O `init` só chega depois da primeira mensagem: o pedido vai logo, e a abertura vale no `init`
+    // conferido. Outro evento antes dele (um hook, por exemplo) não vale (CR1).
     this.escrever(rec, { type: 'user', message: { role: 'user', content: [{ type: 'text', text: pedido }] } });
     return this.esperarPrimeiroEvento(rec, this.esperaAberturaMs, { ok: true, chaveNova: chave }, false);
   }
@@ -389,10 +394,10 @@ export class Orquestrador {
 
   interromper({ rec }) {
     if (!this.ativa(rec)) return falha(ERROS.naoComandada);
+    // Os pedidos pendentes morrem com o turno interrompido: cada um recebe a negativa antes do interrupt (CR2).
+    this.negarPendentes(rec, 'Interrompido pelo painel.');
     const id = `int_${crypto.randomBytes(8).toString('hex')}`;
     if (!this.escrever(rec, { type: 'control_request', request_id: id, request: { subtype: 'interrupt' } })) return falha(ERROS.escrita);
-    // Os pedidos pendentes morrem com o turno interrompido.
-    for (const pedido of [...rec.pendentes.keys()]) this.tirarPendente(rec, pedido);
     return { ok: true };
   }
 
@@ -437,7 +442,7 @@ export class Orquestrador {
     novo.modelo = modelo;
     novo.esforco = esforco;
     this.falhas.delete(chave);
-    // Sem mensagem não há evento: vale o primeiro evento ou o filho vivo depois da espera.
+    // Sem mensagem não há `init`: vale o `init` conferido ou o filho vivo depois da espera.
     return this.esperarPrimeiroEvento(novo, this.esperaRetomarMs, { ok: true }, true);
   }
 
@@ -520,7 +525,9 @@ export class Orquestrador {
     return [...a, ...this.argsExtra];
   }
 
-  // Inicia o filho e registra a sessão. Devolve null se o `spawn` falhar na hora.
+  // Inicia o filho e registra a sessão. Devolve null se o `spawn` falhar na hora. Quem chama já contou a
+  // abertura (`contarAbertura`): se o Claude Code nem chegar a iniciar, na hora ou pelo evento `error`
+  // (ENOENT), a abertura volta ao contador do dia (CR4).
   iniciar({ chave, conta, sessionId, dir, cwd, modo, args, projeto, nome }) {
     const env = {};
     for (const k of AMBIENTE) if (process.env[k] != null) env[k] = process.env[k];
@@ -531,6 +538,7 @@ export class Orquestrador {
       // grupo inteiro, alcançando os netos (comandos que o Bash deixou em segundo plano) (S18).
       filho = spawn(this.claudeBin, args, { cwd, env, shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
+      this.devolverAbertura();
       return null;
     }
     const rec = {
@@ -553,6 +561,7 @@ export class Orquestrador {
       erro: null,
       relatado: false,
       falhouSpawn: false,
+      aberturaDevolvida: false,
       saida: null,
       aoEvento: null,
       aoFim: [],
@@ -570,6 +579,11 @@ export class Orquestrador {
     });
     filho.on('error', () => {
       rec.falhouSpawn = true;
+      // Sem pid, o processo nunca existiu (o `error` também vem de um sinal que falhou, e aí não volta nada).
+      if (filho.pid === undefined && !rec.aberturaDevolvida) {
+        rec.aberturaDevolvida = true;
+        this.devolverAbertura();
+      }
       this.finalizar(rec);
     });
     // `close` espera o stdio fechar (o fim do stderr já foi lido). Se um neto segurar os canais abertos,
@@ -637,13 +651,15 @@ export class Orquestrador {
     else if (ev.type === 'result') {
       // Um turno inteiro sem `init`: a configuração da sessão nunca foi conferida (S19).
       if (!rec.initConferido) return this.initDivergiu(rec);
-      // O turno acabou: um pedido que ainda estivesse na lista não vale mais.
-      for (const pedido of [...rec.pendentes.keys()]) this.tirarPendente(rec, pedido);
+      // O turno acabou: um pedido que ainda estivesse na lista não vale mais e recebe a negativa (CR2).
+      this.negarPendentes(rec, 'Pedido encerrado.');
       rec.estado = 'esperando_mensagem';
       if (Number.isFinite(ev.total_cost_usd) && ev.total_cost_usd >= 0) rec.custo = ev.total_cost_usd;
     }
-    // Outros tipos (assistant, user, rate_limit_event, control_response, system de outro subtipo): só contam como sinal de vida.
-    this.avisar(rec, { ok: true });
+    // Outros tipos (assistant, user, rate_limit_event, control_response, system de outro subtipo): só
+    // contam como sinal de vida. A abertura só vale depois do `init` conferido: um hook ou um pedido que
+    // chegue antes dele não responde o comando (CR1).
+    if (rec.initConferido) this.avisar(rec, { ok: true });
   }
 
   // Configuração diferente da esperada (ou nunca mostrada): mata o filho e devolve o erro do `init`.
@@ -720,6 +736,15 @@ export class Orquestrador {
     rec.pendentes.delete(pedido);
   }
 
+  // Tira da lista cada pedido ainda pendente e manda a negativa dele. O pedido que o painel já respondeu
+  // saiu da lista antes da resposta: não recebe uma segunda.
+  negarPendentes(rec, mensagem) {
+    for (const pedido of [...rec.pendentes.keys()]) {
+      this.tirarPendente(rec, pedido);
+      this.escrever(rec, { type: 'control_response', response: { subtype: 'success', request_id: pedido, response: { behavior: 'deny', message: mensagem } } });
+    }
+  }
+
   // Uma linha JSON no stdin. Quebras de linha do texto saem escapadas pelo JSON: o texto não forja protocolo.
   escrever(rec, obj) {
     const s = rec.filho.stdin;
@@ -765,7 +790,9 @@ export class Orquestrador {
     }
   }
 
-  // Fecha o stdin; se não sair em esperaFimMs, SIGTERM; mais esperaTermMs, SIGKILL.
+  // Fecha o stdin; se não sair em esperaFimMs, SIGTERM; mais esperaTermMs, SIGKILL. Se nem o SIGKILL o
+  // encerrar em esperaKillMs, o registro é finalizado assim mesmo (sai da contagem de abertas e fica
+  // encerrado) e o log registra o pid: um filho preso não segura a vaga para sempre (CR3).
   async encerrarFilho(rec) {
     if (!rec.vivo) return true;
     rec.saindo = true;
@@ -780,7 +807,11 @@ export class Orquestrador {
     this.sinalizar(rec, 'SIGTERM');
     if (await comPrazo(saiu, this.esperaTermMs)) return true;
     this.sinalizar(rec, 'SIGKILL');
-    return comPrazo(saiu, 5000);
+    if (await comPrazo(saiu, this.esperaKillMs)) return true;
+    if (!rec.vivo) return true;
+    console.error(`orquestrador: o processo ${rec.filho?.pid ?? '?'} da sessão comandada não respondeu ao SIGKILL; o registro foi encerrado sem ele.`);
+    this.finalizar(rec);
+    return false;
   }
 
   // O filho saiu (ou nem chegou a iniciar). Idempotente: `exit`, `close` e `error` podem chegar juntos.
@@ -981,21 +1012,38 @@ export class Orquestrador {
   contarAbertura() {
     const { dia, n } = this.lerContagem();
     if (!Number.isSafeInteger(n)) return false;
+    const erro = this.gravarContagem(dia, n + 1);
+    if (erro) console.error(`orquestrador: não foi possível gravar o contador de aberturas (abrir.json) (${erro}); nada foi aberto.`);
+    return !erro;
+  }
+
+  // O Claude Code nem chegou a iniciar: a abertura contada volta (CR4). Contador corrompido ou ilegível
+  // não é tocado (continua valendo como teto), e o de outro dia já conta zero. A falha de gravar fica só
+  // no log.
+  devolverAbertura() {
+    const { dia, n } = this.lerContagem();
+    if (!Number.isSafeInteger(n) || n <= 0) return;
+    const erro = this.gravarContagem(dia, n - 1);
+    if (erro) console.error(`orquestrador: não foi possível devolver a abertura ao contador (abrir.json) (${erro}); a abertura que falhou continua contada hoje.`);
+  }
+
+  // Grava a contagem (temporário + rename, permissão 600). Devolve null, ou o código do erro (sem caminho
+  // nem conteúdo) se não conseguir.
+  gravarContagem(dia, n) {
     const arq = this.arqContagem();
     const tmp = `${arq}.${process.pid}.tmp`;
     try {
       fs.mkdirSync(this.pastaEstado, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(tmp, JSON.stringify({ dia, n: n + 1 }), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ dia, n }), { mode: 0o600 });
       fs.renameSync(tmp, arq);
-      return true;
+      return null;
     } catch (err) {
-      console.error(`orquestrador: não foi possível gravar o contador de aberturas (abrir.json) (${err?.code || 'erro'}); nada foi aberto.`);
       try {
         fs.rmSync(tmp, { force: true });
       } catch {
         /* nada a limpar */
       }
-      return false;
+      return err?.code || 'erro';
     }
   }
 }

@@ -166,6 +166,7 @@ Corpo `{"id": "...", "nome": "..."}` → `200 {"ok": true}`; `404` se não exist
 
 ## `POST /api/ingest` (só o coletor)
 Corpo `{"protocolo": 2, "retrato": {...} | null, "acks": [...]}` → `200 {"comandos": [{"v", "kid", "id", "tipo", "chave", "criadoEm", "dados", "assinatura", "idadeMs"}], "painelVistoEm": 1794356795887 | null, "aparelhosPedidos": [{"kid", "publica", "rotulo", "criadoEm"}]}`.
+- Corpo JSON que não é objeto (`null`, número, lista, texto) → `400 {"erro": "Corpo inválido."}`, sem gravar nada.
 - `protocolo`: só o coletor que confere assinatura manda `2`. **Sem `protocolo: 2`, o servidor não entrega comando nenhum** (`comandos: []`, e também sem `aparelhosPedidos`): um coletor antigo executaria `encerrar` sem conferir assinatura. Os comandos pendentes continuam guardados até expirar ou até um coletor novo buscar.
 - `retrato`: guardado em `moises:retrato` com validade de 24 h (`EX`), renovada a cada retrato recebido.
 - `comandos`: os pendentes, no máximo 20, do mais antigo para o mais novo, inteiros como o aparelho assinou. `idadeMs` conta da chegada ao servidor (não do relógio do aparelho). Pendente com 2 min ou mais vira `expirado` e não é entregue.

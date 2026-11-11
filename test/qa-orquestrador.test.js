@@ -177,7 +177,12 @@ test('foco 2: depois de interromper, o pedido antigo não pode mais ser aprovado
   assert.equal(aprovar.ok, false);
   assert.equal(aprovar.erro, 'Este pedido de permissão não está mais pendente.');
   await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'sessão voltar a esperar mensagem');
-  assert.deepEqual(respostas(ctx), [], 'nenhuma resposta de permissão chegou ao filho');
+  // Correção final (CR2): o pedido interrompido recebe só a negativa do coletor, nunca uma aprovação.
+  assert.deepEqual(
+    respostas(ctx).map((l) => l.response),
+    [{ subtype: 'success', request_id: p.pedido, response: { behavior: 'deny', message: 'Interrompido pelo painel.' } }],
+    'só a negativa da interrupção chegou ao filho',
+  );
 });
 
 test('foco 2: aprovar depois do prazo, mesmo antes do temporizador disparar, nega o pedido e não aprova', async (t) => {

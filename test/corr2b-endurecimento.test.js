@@ -264,8 +264,10 @@ const TETO_DIA = 'Limite de 20 aberturas e retomadas pelo painel hoje atingido.'
 const ONTEM = () => new Date(Date.now() - 2 * 86_400_000);
 
 test('CA4: abrir.json ausente conta zero', async (t) => {
-  const m = montar(t);
-  assert.equal((await m.abrir()).erro, ERRO_INICIAR, 'passou pelo contador e só não achou o binário');
+  // Correção final (CR4): com o binário inexistente a abertura volta ao contador; a prova usa o falso.
+  const m = montar(t, {}, { comFalso: true });
+  const r = await m.abrir();
+  assert.equal(r.ok, true, r.erro);
   assert.deepEqual(JSON.parse(fs.readFileSync(m.arqContagem, 'utf8')), { dia: diaLocal(Date.now()), n: 1 });
 });
 
@@ -286,11 +288,13 @@ test('CA4: abrir.json corrompido hoje conta como teto atingido, com erro no log 
 
 test('CA4: abrir.json corrompido num dia anterior não segura o dia de hoje', async (t) => {
   t.mock.method(console, 'error', () => {});
-  const m = montar(t);
+  // Correção final (CR4): com o binário inexistente a abertura voltaria ao contador; a prova usa o falso.
+  const m = montar(t, {}, { comFalso: true });
   fs.mkdirSync(m.pastaEstado, { recursive: true });
   fs.writeFileSync(m.arqContagem, '{lixo', { mode: 0o600 });
   fs.utimesSync(m.arqContagem, ONTEM(), ONTEM());
-  assert.equal((await m.abrir()).erro, ERRO_INICIAR);
+  const r = await m.abrir();
+  assert.equal(r.ok, true, r.erro);
   assert.deepEqual(JSON.parse(fs.readFileSync(m.arqContagem, 'utf8')), { dia: diaLocal(Date.now()), n: 1 });
   // E o dia vira: o mesmo arquivo corrompido hoje deixa de segurar amanhã.
   const hoje = montar(t);

@@ -20,6 +20,10 @@
 //   sem-init               sem init: pede permissão para Bash e, com a resposta, emite o result
 //   neto                   dispara `sleep 300` em segundo plano (no mesmo grupo de processos), grava o pid
 //                          dele em <caminho>.neto e responde
+//   hook:<texto>           emite um `system` de subtipo `hook_started` (como um hook SessionStart) antes de
+//                          tudo e segue com <texto> (ex.: `hook:init-ruim`, `hook:morre`, `hook:mudo`)
+//   pedido-solto:<comando> pede permissão para Bash e emite o result logo em seguida, sem esperar a resposta
+//                          (o pedido ainda está pendente no coletor quando o turno acaba)
 //   qualquer outro texto   init coerente com os argumentos e result com o próprio texto
 //
 // Com --system-prompt=registro:<caminho>, grava em <caminho> o argv, os nomes das variáveis de ambiente,
@@ -84,6 +88,10 @@ function concluir(texto, subtype) {
 }
 
 function iniciar(texto) {
+  if (texto.startsWith('hook:')) {
+    emitir({ type: 'system', subtype: 'hook_started', hook_id: 'hook_1', hook_name: 'SessionStart:startup', hook_event: 'SessionStart', session_id: sessionId });
+    return iniciar(texto.slice('hook:'.length));
+  }
   if (texto === 'morre') {
     process.stderr.write('falha simulada no meio; token sk-ant-BBBBBBBBBBBBBBBBBBBBBBBB\n');
     process.exit(3);
@@ -120,6 +128,9 @@ function iniciar(texto) {
     neto.unref();
     if (registro) fs.writeFileSync(`${registro}.neto`, String(neto.pid));
     resultado('neto');
+  } else if (comeca('pedido-solto:') !== false) {
+    emitir({ type: 'control_request', request_id: 'req_solto', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: comeca('pedido-solto:') }, tool_use_id: 'toolu_solto' } });
+    resultado('solto');
   } else if (texto === 'demora') {
     turno = { demora: true };
   } else if (texto === 'lixo') {

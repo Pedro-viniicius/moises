@@ -6,8 +6,10 @@
 // assinatura; S11: teto por minuto só para assinatura válida; R1: data no futuro também gasta o teto).
 import fs from 'node:fs';
 import path from 'node:path';
-import { assinaturaConfere, chavePublica, impressaoDaPublica, RE_KID } from './assinatura.js';
+import { assinaturaConfere, chavePublica, impressaoDaPublica, RE_ASSINATURA, RE_KID } from './assinatura.js';
 import { pastaSoDoDono } from './auditoria.js';
+// Uma só fonte para o que o orquestrador também confere: listas de modelo, esforço e modo, e a chave de sessão.
+import { ESFORCOS, MODELOS, MODOS, RE_CHAVE as RE_SESSAO } from './orquestrador.js';
 
 export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
 export const JANELA_MS = 120_000;
@@ -23,13 +25,12 @@ const ARQ_VISTOS = 'comandos-vistos.json';
 const MAX_DADOS = 8_000;
 const MAX_ROTULO = 40;
 
-// Campos do comando (conferidos antes da assinatura). O kid usa a regex de collector/assinatura.js.
+// Campos do comando (conferidos antes da assinatura). O kid e a assinatura usam as regex de
+// collector/assinatura.js; a chave de sessão, a de collector/orquestrador.js.
+// A assinatura é ECDSA SHA-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15, achado A1): a
+// assinatura HMAC do código do aparelho (43 caracteres) não vale mais e cai no formato.
 const RE_ID = /^c_[0-9a-f]{16}$/;
 const RE_TIPO = /^[A-Za-z_]{1,20}$/; // só a forma; se é um verbo conhecido, decide a etapa `verbo`
-const RE_SESSAO = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-// ECDSA SHA-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15, achado A1). A assinatura HMAC
-// do código do aparelho (43 caracteres) não vale mais e cai aqui, no formato.
-const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
 // Dados por verbo.
 const RE_PROJETO = /^[A-Za-z0-9._-]{1,60}$/; // mesma regra dos nomes de projetos.json
 const RE_CONTA = /^[a-z0-9]{1,20}$/; // mesma regra do prefixo da chave de sessão
@@ -38,9 +39,6 @@ const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_HASH = /^[0-9a-f]{64}$/;
 // Motivo de `desligar` (vai no ack e na auditoria).
 const RE_MOTIVO = /^[a-z_]{1,20}$/;
-const MODELOS = ['haiku', 'sonnet', 'opus', 'fable'];
-const ESFORCOS = ['low', 'medium', 'high', 'xhigh', 'max'];
-const MODOS = ['manual', 'acceptEdits', 'plan'];
 const DECISOES = ['aprovar', 'negar'];
 
 const ERROS = {

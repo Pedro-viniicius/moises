@@ -13,11 +13,11 @@ import {
   pedidosDeAparelho,
   K,
   MAX_PEDIDOS_APARELHO,
+  RE_KID,
 } from './_lib.js';
 
 const MAX_CORPO = 2_000;
 const CAMPOS = ['kid', 'publica', 'rotulo'];
-const RE_KID = /^[0-9a-f]{6}$/;
 const RE_PUBLICA = /^[A-Za-z0-9_-]{87}$/;
 const MAX_ROTULO = 40;
 const INVISIVEL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
