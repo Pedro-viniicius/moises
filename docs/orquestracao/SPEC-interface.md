@@ -122,11 +122,11 @@ Conteúdo, de cima para baixo:
 
 1. `h3` "Pedido de permissão" (com "2 de 3" quando houver mais de um) e o marcador losango do selo.
 2. `<p>`: "A sessão quer usar a ferramenta **Bash**." (nome da ferramenta em negrito, `textContent`).
-3. Se `sensivel: true`: `<p class="permissao-aviso">` **antes da entrada e dos botões**, com "Atenção." em negrito: "Atenção. Este pedido mexe com chaves, senhas ou configuração do Moisés ou do Claude Code. Aprove só se foi você quem pediu isso." Mesma faixa do bloco, texto em `--aviso-texto`; a palavra "Atenção." é o sinal, não a cor. Não bloqueia: o dono pode aprovar ou negar.
-4. Rótulo "O que ela quer fazer" e `<pre class="entrada" tabindex="0" role="group" aria-label="Entrada do pedido">` com `entrada` via `textContent` e `font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.875rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow: auto; background: var(--superficie); border: 1px solid var(--borda); border-radius: 8px; padding: 10px`. **As quebras de linha são preservadas e nada é cortado com reticências** (sem `text-overflow`, sem `line-clamp`): o que aparece é exatamente o que será assinado (`vistoHash`). Caracteres invisíveis e de direção de texto já chegam escapados como `\u{XXXX}` e aparecem assim, em texto comum; a interface não os altera. `tabindex="0"` só para o trecho rolar pelo teclado.
+3. Se `sensivel: true`: `<p class="permissao-aviso">` **antes da entrada e dos botões**, com "Atenção." em negrito: "Atenção. Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue." Mesma faixa do bloco, texto em `--aviso-texto`; a palavra "Atenção." é o sinal, não a cor. O pedido sensível mostra **só Negar** (o coletor também recusa a aprovação).
+4. Rótulo "O que ela quer fazer", `.meta` com "N linhas" ("1 linha" no singular) e `<pre class="entrada" role="group" aria-label="Entrada do pedido">` com `entrada` via `textContent` e `font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.875rem; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--superficie); border: 1px solid var(--borda); border-radius: 8px; padding: 10px`. **As quebras de linha são preservadas e nada é cortado com reticências** (sem `text-overflow`, sem `line-clamp`): o que aparece é exatamente o que será assinado (`vistoHash`). Caracteres invisíveis e de direção de texto já chegam escapados como `\u{XXXX}` e aparecem assim, em texto comum; a interface não os altera. O pedido aparece **inteiro, sem `max-height` nem rolagem própria** (S14/A2): quem aprova vê tudo, e a contagem de linhas acima denuncia texto escondido.
 5. Se a entrada contém `[oculto]`: `.meta` "Trechos marcados [oculto] foram escondidos por segurança."
 6. Botões `.botoes`:
-   - `completo: true`: **Negar** (`.btn`, neutro, à esquerda) e **Aprovar** (`.btn.btn-primario`). Mesma altura de 44 px, `gap: 8px`; em 320 px lado a lado se couber, senão empilhados, Aprovar por cima. Nenhum é "perigo" vermelho: negar é o lado seguro.
+   - `completo: true` e não `sensivel`: **Negar** (`.btn`, neutro, à esquerda) e **Aprovar** (`.btn.btn-primario`). Mesma altura de 44 px, `gap: 8px`; em 320 px lado a lado se couber, senão empilhados, Aprovar por cima. Nenhum é "perigo" vermelho: negar é o lado seguro.
    - `completo: false`: faixa `.permissao-aviso` com "Este pedido não coube inteiro no painel; só é possível negar." e **só Negar**. Aprovar **não é exibido** (some, em vez de ficar desabilitado, para não induzir a insistir). Não existe "Aprovar mesmo assim": não se aprova o que não foi visto inteiro.
 
 Estados:
@@ -135,14 +135,14 @@ Estados:
 |---|---|
 | `completo: true` | Aprovar e Negar habilitados |
 | `completo: false` | só Negar, com o texto acima |
-| `sensivel: true` | aviso do item 3 antes dos botões; combina com qualquer outro estado |
+| `sensivel: true` | aviso do item 3 antes dos botões e **só Negar**, mesmo com `completo: true` |
 | Aparelho sem código | Aprovar e Negar aparecem normais; ao tocar, `enviarComando` abre o diálogo do código (item 8) e, guardado o código, a resposta segue sozinha |
 | Enviando resposta | os dois botões desabilitados, o clicado vira "Aprovando…" ou "Negando…" |
 | Respondido | o bloco fica, com os botões trocados por "Resposta enviada. Aguardando o coletor." até o pedido sumir de `permissoes` na próxima consulta; some do DOM com o foco indo para o título da seção "Última resposta" (ou, se o cartão fechou, para o cabeçalho do cartão) |
 | Recusado pelo coletor | `.acao-estado.erro` dentro do bloco com o texto do motivo (item 6). Se o motivo for `assinatura` ou `aparelho`, mais "Digitar o código de novo". Se o coletor disser que o pedido não está mais pendente ou que mudou, o bloco some na consulta seguinte; nos demais casos os botões voltam |
 | Erro antes de chegar ao servidor | `.acao-estado.erro` dentro do bloco, texto do item 6 ("Não enviado: …"); botões voltam |
-| Coletor fora do ar ou orquestração desligada | pedido visível (último conhecido) com faixa: "O coletor está fora do ar. Este pedido pode já ter sido resolvido." Botões desabilitados |
-| Entrada longa | rola dentro do `<pre>`; nunca estoura a coluna |
+| Coletor fora do ar ou orquestração desligada | pedido visível (último conhecido), botões desabilitados e ligados por `aria-describedby` ao motivo das ações (item 9). Com o coletor fora do ar, o bloco ainda ganha a faixa própria "O coletor está fora do ar. Este pedido pode já ter sido resolvido." |
+| Entrada longa | o `<pre>` cresce até mostrar tudo, quebrando linhas longas; nunca estoura a coluna |
 | Vários pedidos | empilhados, cada um com o seu estado |
 
 O comando de aprovar leva `vistoHash = hashVisto(ferramenta, entrada)` calculado sobre exatamente o texto exibido no `<pre>`; os dois comandos levam `visto` (projeto e nome do cartão). Se o retrato mudar a `entrada` do mesmo `pedido` depois de exibida, o bloco é recriado e o hash segue o que está na tela no momento do toque.
@@ -167,7 +167,7 @@ Regras: Encerrar e Interromper aparecem sempre que a matriz diz sim, mesmo com o
 
 **Interromper** (confirmação inline, `.confirmar`): texto "Interromper o que a sessão está fazendo agora? A sessão continua aberta e você pode mandar outra mensagem." Botões "Interromper" (`.btn-perigo`) e "Cancelar". Foco inicial em Cancelar.
 
-**Encerrar** (confirmação inline, o formulário que já existe, com texto novo): título "Encerrar esta sessão?". Comandada: "O processo será fechado no computador. Você pode retomar a conversa depois." Não comandada: "O Claude Code desta sessão será finalizado no computador, inclusive no terminal onde ele está aberto. Trabalho que não foi salvo pode se perder. Você pode retomar a conversa pelo painel depois." Campo "Nome do trabalho" como hoje; botões "Encerrar e salvar log" (`.btn-primario`) e "Cancelar". Foco inicial no campo, como hoje; Esc cancela.
+**Encerrar** (confirmação inline, o formulário que já existe, com texto novo): título "Encerrar esta sessão?". Comandada: "O processo será fechado no computador. Você pode retomar a conversa depois." Não comandada: "O Claude Code desta sessão será finalizado no computador, inclusive no terminal onde ele está aberto. Trabalho que não foi salvo pode se perder. Você pode retomar a conversa pelo painel depois." Campo "Nome do trabalho" como hoje; com o campo vazio, enviar mostra "Escreva um nome para o trabalho." (`.acao-estado.erro`) e devolve o foco ao campo; botões "Encerrar e salvar log" (`.btn-primario`) e "Cancelar". Foco inicial no campo, como hoje; Esc cancela.
 
 **Retomar** (inline, `.confirmar`): "Retomar esta conversa no computador?" Três campos: Modo de permissão (select, padrão "Perguntar antes de agir (manual)"), Modelo (select, padrão "Manter o da sessão") e Esforço (select, padrão "Manter o da sessão"). Botões "Retomar sessão" (`.btn-primario`) e "Cancelar".
 
@@ -195,7 +195,7 @@ Frases por verbo (pendente / recebido / feito): **mensagem**: acima. **permissao
 | `motivo` | Texto (depois de "O coletor recusou a mensagem:") | Ação extra |
 |---|---|---|
 | `assinatura`, `aparelho` | "o código deste aparelho não foi aceito pelo computador." | botão `.btn-leve` "Digitar o código de novo" (abre o diálogo do item 8) |
-| `relogio` | "a hora deste aparelho está diferente da do computador. Acerte a data e a hora do celular (ajuste automático) e tente de novo." | nenhuma |
+| `relogio` (relógio do aparelho adiantado ou atrasado: o coletor manda o erro certo em cada caso) | "o relógio deste aparelho está errado. Acerte a data e a hora (de preferência no automático) e tente de novo." | nenhuma |
 | `expirado` | "o pedido demorou mais de 2 minutos para chegar e não foi executado. Tente de novo." | nenhuma |
 | `repetido` | "este pedido já tinha sido recebido." | nenhuma |
 | `ritmo` | "pedidos demais em pouco tempo. Espere um minuto e tente de novo." | nenhuma |
@@ -274,7 +274,7 @@ Conteúdo: título "Código do aparelho". Texto: "Este aparelho ainda não pode 
 "Fora do ar" = sem retrato ou `recebidoEm` com mais de 120 s (mesma regra do `COLETOR_PARADO_MS`). Ordem de prioridade do motivo: coletor fora do ar, depois orquestração desligada.
 
 - **Banner** `#banner-coletor` (`.banner`, `role="status"`), acima do botão Nova sessão: "O coletor está fora do ar desde 14:02. Você vê o último estado conhecido, mas não pode mandar comandos." Sem retrato nunca: "O coletor ainda não enviou dados. Sem ele não dá para mandar comandos."
-- **Botões**: todos os que enviam comando ficam `disabled` (padrão visual existente: opacidade 0,6). Como botão desabilitado não recebe foco, **o motivo é sempre texto visível**, em `.acao-estado` logo abaixo do grupo (uma vez por cartão, não por botão), ligado por `aria-describedby` aos botões: "Comandos desligados: o coletor está fora do ar desde 14:02."
+- **Botões**: todos os que enviam comando ficam `disabled` (padrão visual existente: opacidade 0,6). Como botão desabilitado não recebe foco, **o motivo é sempre texto visível**, em `.acao-estado` logo abaixo do grupo (uma vez por cartão, não por botão), ligado por `aria-describedby` a todos os controles do cartão (ações, "Enviar mensagem", Negar e Aprovar): "Comandos desligados: o coletor está fora do ar desde 14:02." Esse texto aparece **só nas ações**; mensagem e pedido de permissão não o repetem (D1).
 - **Orquestração desligada**: "Comandos desligados: a orquestração está desligada neste computador." (`orquestracao.ativa` falso ou ausente).
 - **Estado do cartão**: continua o último selo, mas `.meta` no topo do bloco novo diz "Estado de 14:02. Pode estar desatualizado."
 - **Comando já enviado** quando o coletor cai: a linha de andamento fica em "Enviado" e acrescenta, depois de 20 s, "O coletor está fora do ar. O pedido vale por 2 minutos e depois expira."
@@ -297,7 +297,7 @@ Tudo em pt-BR, direto em `app.js` e `index.html` como hoje (o projeto não tem a
 | Selo | item 1 | "Carregando…" da lista | texto cru | n/a | n/a |
 | Última resposta | item 2 | n/a | n/a | "Esta sessão ainda não respondeu." | n/a |
 | Mensagem | caixa | "Enviando…" | `.acao-estado.erro` | caixa vazia, botão desabilitado | com motivo escrito |
-| Permissão | `completo`: Aprovar e Negar; senão só Negar; `sensivel`: aviso antes | "Aprovando…" | "Não enviado: …" ou motivo da recusa (item 6) | sem bloco | faixa do item 9 |
+| Permissão | `completo`: Aprovar e Negar; senão só Negar; `sensivel`: aviso antes e só Negar | "Aprovando…" | "Não enviado: …" ou motivo da recusa (item 6) | sem bloco | faixa do item 9 |
 | Ações | matriz do item 5 | confirmação aberta / botão "Aguarde" | andamento `recusado`/`falhou` | n/a | com motivo escrito |
 | Andamento | passos e frase | `pendente`/`recebido` | `recusado`, `falhou`, `expirado` | oculto sem comando recente | n/a |
 | Nova sessão | formulário e resumo | "Enviando…" | campo e faixa | projetos vazio | item 7 |
@@ -345,7 +345,7 @@ Passos marcados **[conferir no código]** dependem de estado difícil de provoca
 4. Abrir cada cartão e comparar com a matriz do item 5, para comandada e não comandada. Encerrada: Retomar só aparece quando o retrato traz `retomavel: true`.
 5. Sessão comandada em `esperando_mensagem`: digitar uma mensagem, esperar 16 s (um ciclo de consulta) e confirmar que o texto e o foco continuam. Tocar "Enviar mensagem": o código do aparelho é pedido na primeira vez. Digitar o código de teste; a mensagem sai sozinha; ver Enviado → Recebido → Executado, texto limpo, foco no campo. Conferir no DevTools (Application → IndexedDB → `moises`) que há só `kid` e uma chave não extraível, e que `localStorage` não tem nada do código.
 6. Código de outro aparelho (um código válido que o computador não conhece): o coletor recusa com o motivo `aparelho`; ver o texto do motivo, o botão "Digitar o código de novo" e a mensagem devolvida à caixa.
-7. Pedido de permissão com entrada de várias linhas: ver ferramenta, entrada em monoespaçada com as quebras preservadas e rolagem; Negar e Aprovar com andamento. Pedido `sensivel` (por exemplo, ler um arquivo de `~/.config/moises`): o aviso aparece antes dos botões. **[conferir no código]** `completo: false`: só Negar, com o texto "Este pedido não coube inteiro no painel; só é possível negar."; entrada com caractere invisível: aparece como `\u{XXXX}`.
+7. Pedido de permissão com entrada de várias linhas: ver ferramenta, entrada em monoespaçada com as quebras preservadas, "N linhas" acima e sem rolagem própria; Negar e Aprovar com andamento. Pedido `sensivel` (por exemplo, ler um arquivo de `~/.config/moises`): o aviso aparece antes dos botões e só há Negar. **[conferir no código]** `completo: false`: só Negar, com o texto "Este pedido não coube inteiro no painel; só é possível negar."; entrada com caractere invisível: aparece como `\u{XXXX}`.
 8. Dois pedidos na mesma sessão: dois blocos, cada um responde sozinho.
 9. Interromper: confirmação com foco em Cancelar; confirmar e ver o andamento. Encerrar: confirmação com nome, aviso de sessão comandada e de não comandada; ver "Encerrada. Log salvo no Histórico." e o item no Histórico.
 10. Sessão encerrada de projeto da lista (`retomavel: true`): Retomar com seus campos; de projeto fora da lista: só a linha explicativa.

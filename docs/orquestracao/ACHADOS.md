@@ -47,3 +47,6 @@ Revisores: `seguranca` (S14 a S26), modelagem adversarial da revisão diferencia
 | S25, S26 | Informativa | Campos do Bash fora da tela; homóglifos. | S26 coberto pela marca de sensível em comando com letra não ASCII; S25 em aberto (não muda o que roda). |
 | R2, R3, R4, R5 | Sugestão | Confirmações perdidas ao parar; auditoria do `abrir` sem a sessão criada; sessão recém-aberta sem `ultimaResposta`; teste dependente de tempo. | Corrigir. |
 | D1, D2 | Sugestão | Motivo "Comandos desligados" repetido no cartão; encerrar com nome vazio sem aviso. | Corrigir. D3 a D7 em aberto (sugestões). |
+| Q1 | Média (qa) | Relógio do celular atrasado era recusado como "demorou mais de 2 minutos", sem mandar acertar a hora. | Corrigir: o coletor distingue relógio atrasado pela idade informada pelo servidor (só para escolher a mensagem; a decisão continua sendo recusar). |
+| Q2 | Baixa (qa) | A pasta de estado do coletor nascia 775 (o módulo de ideias a criava sem modo). Coincide com o endurecimento sugerido pela auditoria de padrões inseguros. | Corrigir: pastas 700 e arquivos 600 em todos os módulos do coletor. |
+| — | Informativa (qa) | Pedidos legítimos com nome de arquivo de 40+ caracteres sem barra, número de 10 dígitos ou `TOKEN_FILE=` saem mascarados e só podem ser negados pelo celular. | Registrado: falha para o lado seguro; aprove esses no computador. |

@@ -58,7 +58,8 @@ const TEXTOS = {
   msgAnterior: 'Aguarde a mensagem anterior chegar à sessão.',
   msgLonga: 'A mensagem passa de 6.000 caracteres.',
   msgDevolvida: 'Sua mensagem foi devolvida à caixa.',
-  permSensivel: ' Este pedido mexe com chaves, senhas ou configuração do Moisés ou do Claude Code. Aprove só se foi você quem pediu isso.',
+  permSensivel: ' Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue.',
+  permLinhas: (n) => (n === 1 ? '1 linha' : n + ' linhas'),
   permIncompleto: 'Este pedido não coube inteiro no painel; só é possível negar.',
   permOculto: 'Trechos marcados [oculto] foram escondidos por segurança.',
   permRespondido: 'Resposta enviada. Aguardando o coletor.',
@@ -78,6 +79,7 @@ const TEXTOS = {
   erroProjeto: 'Escolha um projeto.',
   erroPedido: 'Escreva o pedido inicial.',
   erroPedidoLongo: 'O pedido passa de 6.000 caracteres.',
+  erroNomeTrabalho: 'Escreva um nome para o trabalho.',
   erroNome: 'Use só letras, números, espaço, ponto, hífen e sublinhado, começando por letra ou número.',
 };
 
@@ -131,7 +133,7 @@ const FRASES = {
 const MOTIVOS = {
   assinatura: 'o código deste aparelho não foi aceito pelo computador.',
   aparelho: 'o código deste aparelho não foi aceito pelo computador.',
-  relogio: 'a hora deste aparelho está diferente da do computador. Acerte a data e a hora do celular (ajuste automático) e tente de novo.',
+  relogio: 'o relógio deste aparelho está errado. Acerte a data e a hora (de preferência no automático) e tente de novo.',
   expirado: 'o pedido demorou mais de 2 minutos para chegar e não foi executado. Tente de novo.',
   repetido: 'este pedido já tinha sido recebido.',
   ritmo: 'pedidos demais em pouco tempo. Espere um minuto e tente de novo.',
@@ -724,12 +726,16 @@ function atualizarMensagem(c) {
   if (m.form.hidden) return;
 
   const motivo = motivoMensagem(s);
+  // "Comandos desligados" aparece uma vez por cartão, nas ações; aqui o botão só aponta para ele (D1).
+  const desligado = !!motivoBloqueio();
   const valor = m.campo.value;
   m.enviar.disabled = m.enviando || !!motivo || !valor.trim();
   m.enviar.textContent = m.enviando ? 'Enviando…' : 'Enviar mensagem';
   m.campo.readOnly = m.enviando;
-  if (m.motivo.textContent !== (motivo || '')) m.motivo.textContent = motivo || '';
-  if (motivo) m.enviar.setAttribute('aria-describedby', m.motivo.id);
+  const proprio = desligado ? '' : motivo || '';
+  if (m.motivo.textContent !== proprio) m.motivo.textContent = proprio;
+  if (desligado) m.enviar.setAttribute('aria-describedby', c.acoes.motivo.id);
+  else if (motivo) m.enviar.setAttribute('aria-describedby', m.motivo.id);
   else m.enviar.removeAttribute('aria-describedby');
   if (m.erro.textContent !== (m.erroTexto || '')) m.erro.textContent = m.erroTexto || '';
   m.contador.hidden = valor.length < CONTADOR_DESDE;
@@ -802,9 +808,9 @@ function criarBlocoPermissao(c, p) {
     raiz.append(aviso);
   }
   raiz.append(el('p', 'permissao-rotulo', 'O que ela quer fazer'));
-  // Exatamente o texto que será assinado (vistoHash): sem corte, sem reticências, quebras preservadas.
+  raiz.append(el('p', 'meta', TEXTOS.permLinhas(entrada ? entrada.split('\n').length : 0)));
+  // Exatamente o texto que será assinado (vistoHash): inteiro, sem corte, sem rolagem própria, quebras preservadas.
   const pre = el('pre', 'entrada');
-  pre.tabIndex = 0;
   pre.setAttribute('role', 'group');
   pre.setAttribute('aria-label', 'Entrada do pedido');
   pre.textContent = entrada;
@@ -813,13 +819,16 @@ function criarBlocoPermissao(c, p) {
   if (!completo) raiz.append(el('p', 'permissao-aviso', TEXTOS.permIncompleto));
 
   const faixa = el('p', 'permissao-aviso');
+  faixa.id = idDom('perm-faixa');
   faixa.hidden = true;
   const botoes = el('div', 'botoes botoes-permissao');
   const negar = botao('Negar', 'btn');
   botoes.append(negar);
-  // Pedido que não veio inteiro não oferece Aprovar: nem desabilitado, para não induzir a insistir.
+  // Pedido que não veio inteiro, ou que é sensível, não oferece Aprovar: nem desabilitado, para não induzir
+  // a insistir (o coletor também recusa a aprovação nesses casos).
+  const sensivel = p.sensivel === true;
   const aprovar = completo ? botao('Aprovar', 'btn btn-primario') : null;
-  if (aprovar) botoes.append(aprovar);
+  if (aprovar && !sensivel) botoes.append(aprovar);
   const respondido = el('p', 'acao-estado', TEXTOS.permRespondido);
   respondido.tabIndex = -1;
   respondido.hidden = true;
@@ -831,12 +840,12 @@ function criarBlocoPermissao(c, p) {
   raiz.append(faixa, botoes, respondido, erro, codigo);
 
   const b = {
-    raiz, titulo, pre, faixa, botoes, negar, aprovar, respondido, erro, codigo,
+    raiz, titulo, pre, faixa, botoes, negar, aprovar: sensivel ? null : aprovar, respondido, erro, codigo,
     pedido: p.pedido, ferramenta, completo, enviando: null, idCmd: null, erroTexto: null,
     assinatura: JSON.stringify([ferramenta, entrada, completo, p.sensivel === true]),
   };
   negar.addEventListener('click', () => responderPermissao(c, b, 'negar'));
-  if (aprovar) aprovar.addEventListener('click', () => responderPermissao(c, b, 'aprovar'));
+  if (b.aprovar) b.aprovar.addEventListener('click', () => responderPermissao(c, b, 'aprovar'));
   return b;
 }
 
@@ -862,7 +871,7 @@ function atualizarPermissoes(c) {
     }
     b.titulo.textContent = 'Pedido de permissão' + (pedidos.length > 1 ? ' (' + (i + 1) + ' de ' + pedidos.length + ')' : '');
     if (c.permissoesBox.children[i] !== b.raiz) c.permissoesBox.insertBefore(b.raiz, c.permissoesBox.children[i] || null);
-    atualizarBlocoPermissao(b);
+    atualizarBlocoPermissao(c, b);
   });
   for (const [k, b] of c.blocos) {
     if (vistos.has(k)) continue;
@@ -873,7 +882,7 @@ function atualizarPermissoes(c) {
   return perdeuFoco;
 }
 
-function atualizarBlocoPermissao(b) {
+function atualizarBlocoPermissao(c, b) {
   const bloqueio = motivoBloqueio();
   const cmd = b.idCmd ? todosComandos().find((x) => x.id === b.idCmd) : null;
   let respondido = false;
@@ -888,8 +897,17 @@ function atualizarBlocoPermissao(b) {
       respondido = true;
     }
   }
-  b.faixa.hidden = !bloqueio;
-  if (bloqueio) b.faixa.textContent = coletorParado() ? TEXTOS.permForaDoAr : bloqueio;
+  // "Comandos desligados" aparece uma vez por cartão, nas ações (D1). Aqui só fica a frase própria do pedido
+  // quando o coletor parou; nos demais casos os botões apontam para o motivo das ações.
+  const parado = !!bloqueio && coletorParado();
+  b.faixa.hidden = !parado;
+  if (parado) b.faixa.textContent = TEXTOS.permForaDoAr;
+  const motivos = [parado ? b.faixa.id : null, c.acoes.motivo.id].filter(Boolean).join(' ');
+  const controles = b.aprovar ? [b.negar, b.aprovar] : [b.negar];
+  for (const x of controles) {
+    if (bloqueio) x.setAttribute('aria-describedby', motivos);
+    else x.removeAttribute('aria-describedby');
+  }
   b.botoes.hidden = respondido;
   b.respondido.hidden = !respondido;
   b.negar.disabled = !!bloqueio || !!b.enviando;
@@ -905,11 +923,12 @@ function atualizarBlocoPermissao(b) {
 async function responderPermissao(c, b, decisao) {
   if (b.enviando) return;
   if (decisao === 'aprovar' && !b.completo) return;
+  if (decisao === 'aprovar' && !b.aprovar) return; // pedido sensível: só negar
   const clicado = decisao === 'aprovar' ? b.aprovar : b.negar;
   b.enviando = decisao;
   b.erroTexto = null;
   b.idCmd = null;
-  atualizarBlocoPermissao(b);
+  atualizarBlocoPermissao(c, b);
   // A impressão digital sai do que está na tela agora: a ferramenta exibida e o texto do <pre>.
   const exibido = decisao === 'aprovar' ? { ferramenta: b.ferramenta, entrada: b.pre.textContent } : null;
   const r = await enviarComando('permissao', c.sessao, { pedido: b.pedido, decisao }, { exibido });
@@ -1028,9 +1047,16 @@ function abrirConfirmacao(c, tipo) {
     foco = campo;
     dadosDe = () => {
       const nome = campo.value.trim();
-      if (!nome) { campo.focus(); return null; }
+      if (!nome) {
+        erro.textContent = TEXTOS.erroNomeTrabalho;
+        campo.focus();
+        return null;
+      }
       return { nome };
     };
+    campo.addEventListener('input', () => {
+      if (erro.textContent === TEXTOS.erroNomeTrabalho) erro.textContent = '';
+    });
   } else {
     raiz.append(el('p', 'confirmar-titulo', TEXTOS.confRetomar));
     const modos = lista(o.modos).filter((m) => MODOS[m]);
