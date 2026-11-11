@@ -39,12 +39,23 @@ function passaNoLuhn(digitos) {
   return soma % 10 === 0;
 }
 
-function mascarar(s) {
+// No bloco (pedido de permissão), o "base64 longo" não pode pegar caminho de arquivo: um pedido
+// quase sempre tem caminho, e pedido mascarado não pode ser aprovado. Vira três padrões mais estreitos.
+const BASE64_LONGO = PADROES.findIndex((re) => re.source.includes('{40,}'));
+const PADROES_BLOCO = [
+  ...PADROES.slice(0, BASE64_LONGO),
+  /\b[A-Za-z0-9+_-]{40,}/g, // sem barra
+  /\b[A-Za-z0-9+/]{40,}={1,2}/g, // com preenchimento
+  /(?<![A-Za-z0-9+/])(?=[A-Za-z0-9+/]*\+)[A-Za-z0-9+/]{40,}/g, // com ao menos um "+"
+  ...PADROES.slice(BASE64_LONGO + 1),
+];
+
+function mascarar(s, padroes = PADROES) {
   s = s.replace(CARTAO, (m) => {
     const digitos = m.replace(/\D/g, '');
     return digitos.length >= 13 && digitos.length <= 19 && passaNoLuhn(digitos) ? '[oculto]' : m;
   });
-  for (const re of PADROES) s = s.replace(re, '[oculto]');
+  for (const re of padroes) s = s.replace(re, '[oculto]');
   return s;
 }
 
@@ -56,10 +67,12 @@ export function redigir(texto, max = 200) {
   return s || null;
 }
 
-// Controle (menos \n e \t), direção de texto e largura zero: o painel mostra o escape no lugar do caractere,
+// Tudo o que não se vê ou engana: controle (menos \n e \t), formato (direção de texto, largura zero, etiquetas),
+// uso privado, substitutos soltos, separadores de linha e de parágrafo, espaços que não são o comum,
+// seletores de variação e preenchedores. O painel mostra o escape no lugar do caractere,
 // para o dono ver o que um texto escondia.
-const INVISIVEIS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069\u200E\u200F\u200B-\u200D\u2060\uFEFF]/g;
-const escapar = (c) => `\\u{${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}}`;
+const INVISIVEIS = /(?![\n\t ])[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\p{Zs}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}]/gu;
+const escapar = (c) => `\\u{${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}}`;
 
 // Redação de um bloco de texto (pedido de permissão): mantém quebras de linha, tabulações e espaços,
 // mascara os mesmos padrões de `redigir`, escapa os caracteres invisíveis e corta em `max`.
@@ -69,7 +82,7 @@ export function redigirBloco(texto, max = 4000) {
   const original = String(texto);
   // Corta antes das regex: texto enorme não pode travar o coletor.
   let s = original.slice(0, Math.max(4 * max, 1000));
-  s = mascarar(s).replace(INVISIVEIS, escapar);
+  s = mascarar(s, PADROES_BLOCO).replace(INVISIVEIS, escapar);
   if (s.length > max) s = s.slice(0, max - 1) + '…';
   return { texto: s, alterado: s !== original };
 }

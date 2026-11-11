@@ -595,6 +595,47 @@ test('redigirBloco preserva quebras de linha e marca alterado quando mascara, es
   assert.ok(Date.now() - t0 < 1000, `levou ${Date.now() - t0} ms`);
 });
 
+test('redigirBloco não mascara caminho longo de arquivo', () => {
+  const caminho = 'cat /home/usuario/Documentos/projetos/um-projeto-qualquer/src/componentes/arquivo';
+  assert.ok(caminho.length > 60);
+  assert.deepEqual(redigirBloco(caminho), { texto: caminho, alterado: false });
+  const comando = `Edit ${'/a/b'.repeat(30)}/index.js\nrm -rf /tmp/${'pasta/'.repeat(12)}x`;
+  assert.deepEqual(redigirBloco(comando), { texto: comando, alterado: false });
+  // o redigir comum continua mascarando (só o bloco muda)
+  assert.ok(redigir(caminho, 500).includes('[oculto]'));
+});
+
+test('redigirBloco mascara base64 longo sem barra, com preenchimento e com sinal de mais', () => {
+  const b = (n, c = 'xY7') => c.repeat(Math.ceil(n / c.length)).slice(0, n);
+  // 40 ou mais de [A-Za-z0-9+_-], sem barra
+  assert.equal(redigirBloco(`chave ${b(45)} fim`).texto, 'chave [oculto] fim');
+  assert.equal(redigirBloco(`chave ${b(45, 'xY-_7')} fim`).texto, 'chave [oculto] fim');
+  assert.equal(redigirBloco(`chave ${b(39)} fim`).texto, `chave ${b(39)} fim`); // abaixo do mínimo
+  // com barra e preenchimento (= ou ==)
+  const comBarra = `${b(20)}/${b(30)}`;
+  assert.equal(redigirBloco(`x ${comBarra}= y`).texto, 'x [oculto] y');
+  assert.equal(redigirBloco(`x ${comBarra}== y`).texto, 'x [oculto] y');
+  assert.equal(redigirBloco(`x ${comBarra} y`).texto, `x ${comBarra} y`); // sem = nem +: é caminho
+  // com barra e ao menos um sinal de mais
+  const comMais = `${b(20)}/${b(10)}+${b(20)}`;
+  assert.equal(redigirBloco(`x ${comMais} y`).texto, 'x [oculto] y');
+  assert.equal(redigirBloco(`x ${comMais}`).alterado, true);
+});
+
+test('redigirBloco escapa espaço não separável, U+2028, U+061C, seletor de variação e caractere de etiqueta fora do plano básico', () => {
+  const c = (cp) => String.fromCodePoint(cp);
+  const esc = (cp) => `\\u{${cp.toString(16).toUpperCase().padStart(4, '0')}}`;
+  for (const cp of [0xa0, 0x2028, 0x2029, 0x061c, 0xfe0f, 0xe0100, 0xe0041, 0x3000, 0x115f, 0x1160, 0x3164, 0xffa0, 0x00ad, 0xe000, 0x2007]) {
+    const r = redigirBloco(`a${c(cp)}b`);
+    assert.equal(r.texto, `a${esc(cp)}b`, `U+${cp.toString(16)}`);
+    assert.equal(r.alterado, true);
+  }
+  // fora do plano básico: um escape só, com o ponto de código inteiro
+  assert.equal(redigirBloco(c(0xe0041)).texto, '\\u{E0041}');
+  // o espaço comum, \n e \t ficam; letras acentuadas e emoji comum também
+  assert.deepEqual(redigirBloco('a b\n\tç ✓'), { texto: 'a b\n\tç ✓', alterado: false });
+});
+
 test('redigir mascara cartão válido e CEP e não mascara número que falha no Luhn', () => {
   assert.equal(redigir('cartão 4111 1111 1111 1111 fim'), 'cartão [oculto] fim');
   assert.equal(redigir('cartão 4111-1111-1111-1111.'), 'cartão [oculto].');
