@@ -29,23 +29,36 @@ export function ehClaude(pid) {
 }
 
 // Memória local do que já foi executado e do ritmo de encerramentos, gravada em disco
-// para um reinício do coletor não zerar os limites.
-const ARQ_LIMITES = process.env.MOISES_LIMITES_ARQ || path.join(os.homedir(), '.local/state/moises/encerrar.json');
-let executados = new Set();
-let recentes = [];
-try {
-  const d = JSON.parse(fs.readFileSync(ARQ_LIMITES, 'utf8'));
-  executados = new Set(d.executados || []);
-  recentes = d.recentes || [];
-} catch {
-  /* primeira vez */
+// para um reinício do coletor não zerar os limites. O caminho é lido no primeiro uso
+// (não na importação), para o teste poder apontar para uma pasta temporária.
+let arqLimites = null;
+let executados = null;
+let recentes = null;
+function carregarLimites() {
+  if (executados) return;
+  arqLimites = process.env.MOISES_LIMITES_ARQ || path.join(os.homedir(), '.local/state/moises/encerrar.json');
+  executados = new Set();
+  recentes = [];
+  try {
+    const d = JSON.parse(fs.readFileSync(arqLimites, 'utf8'));
+    executados = new Set(d.executados || []);
+    recentes = d.recentes || [];
+  } catch {
+    /* primeira vez */
+  }
+}
+// Esquece o que está em memória; a próxima chamada relê o arquivo. Uso em teste.
+export function reiniciarLimites() {
+  arqLimites = null;
+  executados = null;
+  recentes = null;
 }
 function gravarLimites() {
   try {
-    fs.mkdirSync(path.dirname(ARQ_LIMITES), { recursive: true });
-    const tmp = `${ARQ_LIMITES}.tmp`;
+    fs.mkdirSync(path.dirname(arqLimites), { recursive: true });
+    const tmp = `${arqLimites}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }));
-    fs.renameSync(tmp, ARQ_LIMITES);
+    fs.renameSync(tmp, arqLimites);
   } catch (err) {
     console.error('[encerrar] não gravou os limites:', err.message);
   }
@@ -53,6 +66,7 @@ function gravarLimites() {
 
 export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => process.kill(pid, sig), esperaMaxMs = 10_000, agora = () => Date.now() } = {}) {
   if (process.env.MOISES_ENCERRAR === '0') return { ok: false, erro: 'Encerrar pelo painel está desligado neste computador.' };
+  carregarLimites();
   if (executados.has(cmd.id)) return { ok: false, erro: 'Pedido repetido; já foi tratado.' };
   executados.add(cmd.id);
   gravarLimites();

@@ -9,7 +9,7 @@ import { custo } from '../collector/precos.js';
 import { novoEstado, lerNovidades, somar, diaLocal } from '../collector/transcript.js';
 import { Coletor, statusDe, inicioDoProcesso, fatorOficial } from '../collector/sessoes.js';
 import { redigir } from '../collector/redigir.js';
-import { executarEncerrar, nomePadrao, ehClaude } from '../collector/encerrar.js';
+import { executarEncerrar, reiniciarLimites, nomePadrao, ehClaude } from '../collector/encerrar.js';
 import { urlAceita } from '../collector/index.js';
 import { recomendar, lerResposta, Ideias } from '../collector/ideias.js';
 
@@ -221,6 +221,21 @@ test('encerrar recusa processo que não é do Claude Code', async (t) => {
   const r = await executarEncerrar(c, { id: 'b1', chave: 'principal:dddd', idadeMs: 0 }, { kill: () => (chamou = true) });
   assert.match(r.erro, /não é do Claude Code/);
   assert.equal(chamou, false);
+});
+
+test('encerrar usa o arquivo de limites definido depois da importação', async (t) => {
+  const anterior = process.env.MOISES_LIMITES_ARQ;
+  const arq = path.join(tmp(), 'limites.json');
+  process.env.MOISES_LIMITES_ARQ = arq;
+  reiniciarLimites();
+  t.after(() => {
+    process.env.MOISES_LIMITES_ARQ = anterior;
+    reiniciarLimites();
+  });
+  const r = await executarEncerrar({}, { id: 'limites-novo-1', chave: null, idadeMs: 0 });
+  assert.match(r.erro, /sem sessão válida/);
+  assert.ok(fs.existsSync(arq), 'o arquivo de limites da variável de ambiente deveria ter sido gravado');
+  assert.deepEqual(JSON.parse(fs.readFileSync(arq, 'utf8')).executados, ['limites-novo-1']);
 });
 
 test('nome padrão do log', () => {
