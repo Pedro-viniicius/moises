@@ -311,8 +311,14 @@ export function lerProjetos(arquivo)   // → { nome: caminho }; {} se o arquivo
 export function proximoIntervalo({ painelVistoEm, abertas, acksPendentes, agora, lento, rapido }) // → ms
 export async function tratarComandos({ comandos, porteiro, orquestrador, acks, aoTerminar }) // enfileira acks; não bloqueia o laço
 export async function rodar(opcoes)    // o laço; devolve { parar() }. main() chama rodar() com a configuração de produção
-// opcoes: { url, token, pastaEstado, chavesArq, projetosArq, dirs?, intervaloMs, intervaloRapidoMs, soPrefixo?, argsExtra?, ideiasTetoDia?, log? }
+// opcoes: { url, token, pastaEstado, chavesArq, projetosArq, dirs?, intervaloMs, intervaloRapidoMs, soPrefixo?, argsExtra?,
+//           maxSessoes?, maxAbrirPorDia?, tetoSessaoUsd?, ferramentas?, permissaoExpiraMs?, claudeBin?, ideiasTetoDia?, log? }
+// rodar() resolve depois de montar tudo e iniciar o laço (não espera o laço acabar); parar() é assíncrono:
+//   para o laço, chama orquestrador.fechar() e só resolve com todos os filhos encerrados.
+// log: função usada no lugar de console.log/console.error para as mensagens do laço (padrão: console).
 ```
+
+`main()` só roda quando `collector/index.js` é o ponto de entrada (`import.meta.url === pathToFileURL(process.argv[1]).href`); importar o módulo não inicia nada, não lê `coletor.env` e não instala tratadores de sinal. O teste de ponta a ponta (`test/e2e/orquestracao.e2e.js`, já escrito pelo lead) chama `rodar()` com essas opções: use-o como referência de uso, sem editá-lo.
 
 Decisões:
 
