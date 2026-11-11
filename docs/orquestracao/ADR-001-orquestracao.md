@@ -2,7 +2,8 @@
 
 - **Data:** 11/11/2026 · **Estado:** aceita (decisão tomada sem parar para perguntar, como manda a regra 10 do briefing; as suposições estão em `PERGUNTAS.md`)
 - **Versão testada:** Claude Code 2.1.322, Linux, contas `principal` e `conta2`
-- **Onde foram os testes:** pasta sandbox `~/moises-sandbox`, só sessões `moises-teste-…` criadas para isso, modelo Haiku. Gasto somado dos testes desta ADR: menos de US$ 0,02.
+- **Onde foram os testes:** pasta sandbox `~/moises-sandbox`, só sessões `moises-teste-…` criadas para isso, modelo Haiku. Gasto somado dos testes desta ADR: menos de US$ 0,05.
+- **Revisão:** o canal de comandos foi revisto no mesmo dia, depois da revisão de segurança do desenho (`ACHADOS.md`). A escolha do caminho B não mudou.
 
 ## A pergunta
 
@@ -19,7 +20,7 @@
 
 ### O que muda no seu dia a dia
 
-- **Para comandar pelo painel, a sessão tem de nascer no Moisés** (botão "Nova sessão") ou ser **retomada por ele** depois de fechada no terminal (botão "Retomar"). Essas sessões rodam sem janela de terminal, conduzidas pelo coletor.
+- **Para comandar pelo painel, a sessão tem de nascer no Moisés** (botão "Nova sessão") ou ser **retomada por ele** depois de fechada no terminal (botão "Retomar"). Essas sessões rodam sem janela de terminal, conduzidas pelo coletor, e isoladas: sem seus plugins, MCP, hooks e skills (ver "Sessões comandadas nascem isoladas").
 - **Uma sessão é do terminal ou do Moisés, nunca dos dois ao mesmo tempo.** Para trazer uma sessão do Moisés para o terminal: encerre no painel e rode `claude --resume <id>`. Para o caminho inverso: feche no terminal e toque em "Retomar".
 - **Sessões abertas à mão continuam com ver e encerrar**, e ganham estado ao vivo (trabalhando, esperando mensagem, esperando permissão), tarefa e última resposta, porque isso sai do registro e do transcript que o coletor já lê.
 - Para mandar mensagem do celular a uma sessão aberta à mão, o caminho que funciona hoje é o do próprio Claude Code: digite `/rc` nela (ou abra com `claude --remote-control`) e use o app do Claude.
@@ -57,21 +58,31 @@
 
 ### Canal de comandos
 
-- **Verbos fixos** no campo `tipo` (o mesmo campo de hoje, para um coletor antigo ignorar o que não conhece): `abrir`, `mensagem`, `permissao`, `interromper`, `encerrar`, `retomar`. Nada de texto de shell vindo do painel.
-- **Credencial que não mora na nuvem.** Um "código de comandos" é gerado na máquina por um script novo e digitado uma vez em cada aparelho. Dele sai uma chave (PBKDF2-SHA256) que fica no coletor e no navegador. Todo comando sai do navegador assinado (HMAC-SHA256) sobre versão, id, tipo, sessão, horário de criação e dados. A Vercel e o Redis só transportam: **quem tomar o painel, o Redis ou a Vercel não consegue criar um comando que o coletor aceite**. Sem chave configurada no coletor, todo comando é recusado.
-- **Validade e repetição conferidas na máquina.** O horário de criação faz parte da assinatura; o coletor recusa comando com mais de 2 min ou com data no futuro além de 30 s, e guarda em disco os ids já vistos.
-- **Auditoria local**, em `~/.local/state/moises/auditoria.jsonl` (permissão 600): quando, quem (impressão digital da chave), sessão, verbo, se foi aceito ou recusado e o resultado. O texto das mensagens não entra.
-- **Limites locais**, que o painel não muda: lista de projetos em arquivo na máquina, modos de permissão aceitos (`manual`, `acceptEdits`, `plan`; `bypassPermissions` é recusado sempre), teto de sessões comandadas abertas, teto de comandos por minuto e a chave `MOISES_COMANDOS=0` que desliga tudo.
-- **Pedido de permissão conferível.** O coletor assina o que a sessão quer fazer (ferramenta e entrada) com a mesma chave; o painel só libera o botão "Aprovar" se a assinatura conferir. Assim ninguém no meio troca o comando mostrado.
+Esta parte foi revista depois da revisão de segurança do desenho (achados S1 a S13, em `ACHADOS.md`).
+
+- **Verbos fixos** no campo `tipo`: `abrir`, `mensagem`, `permissao`, `interromper`, `encerrar`, `retomar`. Nada de texto de shell vindo do painel. Comando sem verbo ou sem assinatura é recusado, inclusive o Encerrar antigo.
+- **Credencial que não mora na nuvem, uma por aparelho.** Um "código do aparelho" é gerado na máquina por um script novo e digitado uma vez em cada aparelho. Dele sai uma chave (PBKDF2-SHA256) que fica num arquivo 600 do coletor e, no navegador, como chave **não extraível** (o navegador assina com ela, mas não consegue lê-la nem copiá-la). Todo comando sai assinado (HMAC-SHA256) sobre aparelho, id, verbo, sessão, horário e dados. Cada aparelho pode ser revogado sozinho, apagando uma linha do arquivo.
+- **O que essa assinatura garante e o que não garante.** Quem tiver só o Redis, só o cookie de login ou só o token do coletor **não consegue criar um comando**. Quem tomar a conta da Vercel consegue trocar o código do painel e, a partir daí, **assinar comandos enquanto o painel estiver aberto num aparelho autorizado** (não consegue levar a chave embora). Esse resto de risco é contido pelos limites locais abaixo e fica registrado como achado em aberto (S1).
+- **Validade e repetição conferidas na máquina.** O horário de criação faz parte da assinatura; o coletor recusa comando com mais de 2 min ou com data no futuro além de 30 s, e guarda em disco os ids já aceitos por 10 min (poda por tempo, nunca por quantidade; se não conseguir gravar, recusa).
+- **O que você viu é o que vale.** Todo comando sobre uma sessão leva o projeto e o nome que o cartão mostrava; o coletor recusa se a sessão real for outra. Em "Aprovar", o comando leva a impressão digital (SHA-256) do pedido que apareceu na tela, e o coletor só aprova se for igual ao pedido que está pendente. Se o pedido não coube inteiro, teve trecho mascarado ou tem caractere invisível, o painel só oferece "Negar". A resposta à sessão é montada pelo coletor, vale para aquele pedido só e nunca cria regra permanente.
+- **Auditoria local**, em `~/.local/state/moises/auditoria.jsonl` (permissão 600): quando, quem (aparelho), sessão, verbo, se foi aceito ou recusado e o resultado. O texto das mensagens não entra.
+- **Limites locais**, que o painel não muda: lista de projetos em arquivo na máquina; modos de permissão aceitos (`manual`, `acceptEdits`, `plan`; `bypassPermissions` é recusado sempre e desligado nas configurações da sessão); teto de sessões abertas (4), de aberturas por dia (20), de comandos por minuto (30) e de gasto por sessão (US$ 5, pelo `--max-budget-usd` do próprio Claude Code); pedido de permissão sem resposta em 30 min é negado; e a chave `MOISES_COMANDOS=0`, que desliga tudo.
 - **Rapidez.** Com o painel aberto (o servidor informa quando foi visto), o coletor busca a cada 3 s em vez de 20 s.
+
+### Sessões comandadas nascem isoladas
+
+Uma sessão aberta pelo painel roda com `--restricted --tools=Bash,Read,Edit,Write,Glob,Grep --strict-mcp-config --disable-slash-commands` e um `--settings` fixo do coletor. Na prática: **não carrega seus plugins, servidores MCP, hooks, skills, comandos de barra nem regras de permissão**; só o `CLAUDE.md` do projeto e as seis ferramentas básicas. O motivo é que uma sessão dirigida de fora não pode herdar uma regra "permitir sempre" nem um hook que aprove sozinho. Testado na sandbox (spike B6): o `init` mostrou só as seis ferramentas, nenhum MCP, nenhuma skill; `/help` respondeu que não está disponível; mensagem começando com `!` virou texto comum e pediu permissão; a leitura de `~/.config/moises/` foi negada pela regra fixa; em `acceptEdits`, arquivo comum foi escrito sem pedir, mas `.claude/settings.local.json` e `.git/hooks/pre-commit` pediram permissão.
+
+O coletor confere cada `init` da sessão e a encerra se o modo de permissão ou a lista de ferramentas não for o esperado. O processo recebe um ambiente mínimo (sem `MOISES_*`, sem agente de SSH, sem variáveis `CLAUDE*` herdadas). A lista de ferramentas pode ser ampliada por configuração local, nunca pelo painel (P16 em `PERGUNTAS.md`).
 
 ### O que passa a sair da máquina
 
-Hoje sobem só metadados e resumos. Para comandar, passam a subir também, sempre por `redigir.js` e cortados: a última resposta do Claude, o primeiro pedido (como tarefa) e o conteúdo do pedido de permissão. Descem pelo painel: o pedido inicial e as mensagens que você digitar. O texto de um comando é apagado do Redis assim que o coletor confirma o recebimento.
+Hoje sobem só metadados e resumos. Para comandar, passam a subir também, sempre mascarados por `redigir.js` e cortados: a última resposta do Claude (1.200 caracteres), o primeiro pedido (como tarefa, 140) e o conteúdo do pedido de permissão (4.000, com as quebras de linha). Descem pelo painel: o pedido inicial e as mensagens que você digitar. O texto de um comando é apagado do Redis quando o coletor confirma o recebimento ou quando o comando expira. **Esse conteúdo não é cifrado**: a Vercel e o Upstash conseguem lê-lo enquanto passa (achado S10, em aberto; a cifra está em `IDEIAS.md`). Para não subir texto nenhum, `MOISES_SUBIR_TEXTO=0` no coletor: o painel continua comandando, mas sem mostrar resposta, e pedido de permissão só pode ser negado.
 
 ## Consequências
 
-- **Bom:** as cinco capacidades do MVP funcionam e são testáveis com o Claude Code de verdade; zero dependência nova; a nuvem deixa de ser ponto de confiança para comandos.
-- **Custo:** sessões comandadas não têm janela de terminal; para vê-las "ao vivo" no computador é preciso retomar no terminal. Um aparelho novo exige digitar o código de comandos.
+- **Bom:** as cinco capacidades do MVP funcionam e são testáveis com o Claude Code de verdade; zero dependência nova; Redis, cookie e token do coletor deixam de bastar para comandar a máquina.
+- **Custo:** sessões comandadas não têm janela de terminal; para vê-las "ao vivo" no computador é preciso retomar no terminal. Elas não usam seus plugins, MCP nem skills. Um aparelho novo exige digitar o código dele. Reiniciar o coletor encerra as sessões comandadas (dá para retomar depois).
+- **Riscos que ficam com você** (detalhe em `ACHADOS.md`): a conta da Vercel tomada consegue comandar enquanto o painel estiver aberto (S1); o que o painel mostra de estado pode ser adulterado ou atrasado por quem controla o Redis, embora os comandos não (S6); o texto que passa pelo painel não é cifrado (S10); um comando aprovado roda com o seu usuário, que lê os seus arquivos (S4).
 - **Risco aceito:** o protocolo de controle (`can_use_tool`, `interrupt`) não está no `--help`. Mitigação: o teste de ponta a ponta exercita as cinco capacidades contra o Claude Code instalado; rode-o depois de cada atualização. Se o protocolo mudar, o plano B é trocar o módulo por um turno por processo (`claude -p --resume`) com hook `PermissionRequest`, ambos documentados.
 - **Fora desta decisão:** instalar o hook de permissão nas sessões abertas à mão, fila de mensagens pelo hook `Stop`, cifrar o conteúdo de ponta a ponta. Estão em `IDEIAS.md`.
