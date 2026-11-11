@@ -27,7 +27,11 @@ const INDEX = path.join(RAIZ, 'collector/index.js');
 const CONFIGURAR = path.join(RAIZ, 'scripts/configurar-comandos.js');
 const FALSO = fileURLToPath(new URL('./fixtures/claude-falso.js', import.meta.url));
 const PUBLICA = path.join(RAIZ, 'public');
-const ARQUIVOS_PAINEL = ['index.html', 'app.js', 'assinatura.js', 'cofre.js', 'style.css'];
+// Rodada 2 (S27): a conferência cobre todos os arquivos de public/ (com as subpastas) e o caminho `/`.
+const arquivosDe = (pasta) =>
+  fs.readdirSync(pasta, { recursive: true }).map((n) => n.split(path.sep).join('/')).filter((n) => fs.statSync(path.join(pasta, n)).isFile()).sort();
+const ARQUIVOS_PAINEL = arquivosDe(PUBLICA);
+const PEDIDOS_DA_CONFERENCIA = [...ARQUIVOS_PAINEL, ''].sort(); // '' é o GET de `/`
 const PAINEL_ALTERADO = 'O painel publicado é diferente do código deste computador; comandos desligados.';
 const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-laco-'));
 // O encerrar antigo grava os limites onde a variável manda (lida no primeiro uso, não na importação).
@@ -69,7 +73,7 @@ const gravarChaves = (arquivo, aparelhos) => gravarChavesNoFormato(arquivo, apar
 // Porteiro de verdade (chaveiro, auditoria e vistos numa pasta própria) e um aparelho autorizado.
 function canal() {
   const d = novaPasta();
-  const ap = novoAparelho('ab2cd3', 'celular');
+  const ap = novoAparelho(null, 'celular'); // kid derivado da chave pública (Rodada 2, SE-B3 do dev B)
   const chavesArq = path.join(d, 'chaves-comandos.json');
   gravarChaves(chavesArq, [ap]);
   const estado = path.join(d, 'estado');
@@ -257,7 +261,7 @@ test('tratarComandos confirma o recebimento antes do resultado e depois o result
     [ruim.id, 'falhou'],
     [ok.id, 'feito'],
   ]);
-  assert.equal(linhas[3].quem, 'ab2cd3 (celular)');
+  assert.equal(linhas[3].quem, `${m.ap.kid} (celular)`);
   const tudo = JSON.stringify(linhas) + logs.join('\n');
   assert.ok(!tudo.includes('TEXTO-SECRETO'));
 });
@@ -403,7 +407,7 @@ function doisComOMesmoKid() {
   }
 }
 
-test('configurar-comandos --pedidos lista kid, rótulo, impressão digital e horário, e nunca a chave pública', () => {
+test('configurar-comandos --pedidos lista kid, rótulo e horário, e nunca a chave pública nem a impressão digital', () => {
   const c = configuracao();
   // Sem arquivo de pedidos: diz que não há e explica como pedir.
   const vazio = c.rodarScript('--pedidos');
@@ -421,10 +425,11 @@ test('configurar-comandos --pedidos lista kid, rótulo, impressão digital e hor
     const linha = r.stdout.split('\n').find((l) => l.includes(ap.kid));
     assert.ok(linha, `linha do ${ap.rotulo}`);
     assert.ok(linha.includes(ap.rotulo));
-    assert.ok(linha.includes(ap.impressao), 'a impressão digital é calculada aqui, da chave pública');
     assert.match(linha, /\d{2}:\d{2}/, 'horário do pedido');
   }
   const saida = r.stdout + r.stderr;
+  // Rodada 2 (SE-M3): a impressão digital é digitada a partir do aparelho; copiá-la do terminal pularia a conferência.
+  for (const ap of [a, b]) assert.ok(!saida.includes(ap.impressao) && !saida.includes(ap.impressao.replaceAll('-', '')), 'nunca a impressão digital');
   for (const ap of [a, b, vencido, comControle]) assert.ok(!saida.includes(ap.publica), 'nunca a chave pública');
   // Pedido incoerente (kid que não é o da chave), vencido ou com caractere de controle não aparece.
   assert.ok(!saida.includes('mentiroso'));
@@ -537,7 +542,7 @@ test('configurar-comandos --autorizar não autoriza sem a impressão digital cer
   // Pedido trocado entre --pedidos e --autorizar, com o mesmo kid: o dono viu (e digita) a impressão de x,
   // mas o servidor passou a entregar y. Nada é gravado.
   c.pedidos([pedidoDe(x)]);
-  assert.ok(c.rodarScript('--pedidos').stdout.includes(x.impressao));
+  assert.ok(c.rodarScript('--pedidos').stdout.includes(x.kid));
   c.pedidos([pedidoDe(y)]);
   const trocado = c.rodarScript('--autorizar', x.kid, x.impressao);
   assert.equal(trocado.status, 1);
@@ -623,8 +628,9 @@ test('--revogar tira o aparelho, e --listar aponta o aparelho do formato antigo'
 
 // ---------------------------------------------------------------- rodar e main
 
-// Painel falso: guarda cada corpo recebido e entrega os comandos da fila. Serve os arquivos do painel
-// de `publica` (por padrão, o public/ do repositório); `trocados` muda o que é servido (null: 404).
+// Painel falso: guarda cada corpo recebido e entrega os comandos da fila. Serve todos os arquivos de
+// `publica` (por padrão, o public/ do repositório) e `/` como index.html; `trocados` muda o que é servido
+// (null: 404), pelo nome pedido ('' é `/`).
 // POST cujo corpo satisfaz `estado.segurar` fica sem resposta e o corpo vai para `segurados`.
 async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA, aparelhosPedidos = null } = {}) {
   const pedidos = [];
@@ -636,11 +642,13 @@ async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA, apa
   const estado = { segurar: null };
   const servidor = http.createServer((req, res) => {
     if (req.method === 'GET') {
-      const nome = req.url.slice(1);
+      const nome = decodeURIComponent(req.url.slice(1));
       gets.push(nome);
       if (req.headers.authorization) negados++; // o token nunca vai junto
-      if (!ARQUIVOS_PAINEL.includes(nome)) return res.writeHead(404).end();
-      const conteudo = trocados.has(nome) ? trocados.get(nome) : fs.readFileSync(path.join(publica, nome));
+      const arq = path.join(publica, nome || 'index.html');
+      const existe = arq.startsWith(publica + path.sep) && fs.existsSync(arq) && fs.statSync(arq).isFile();
+      if (!trocados.has(nome) && !existe) return res.writeHead(404).end();
+      const conteudo = trocados.has(nome) ? trocados.get(nome) : fs.readFileSync(arq);
       if (conteudo === null) return res.writeHead(404).end();
       if (typeof conteudo === 'function') return conteudo(res);
       return res.writeHead(200).end(conteudo);
@@ -678,8 +686,7 @@ async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA, apa
 // Cópia dos arquivos do painel numa pasta do caso (o public/ do repositório pode mudar durante o teste).
 function copiaPublica() {
   const d = path.join(novaPasta(), 'public');
-  fs.mkdirSync(d);
-  for (const nome of ARQUIVOS_PAINEL) fs.copyFileSync(path.join(PUBLICA, nome), path.join(d, nome));
+  fs.cpSync(PUBLICA, d, { recursive: true });
   return d;
 }
 
@@ -692,7 +699,7 @@ function ambiente() {
   fs.mkdirSync(proj);
   const projetosArq = path.join(d, 'projetos.json');
   fs.writeFileSync(projetosArq, JSON.stringify({ 'projeto-x': proj }));
-  const ap = novoAparelho('ab2cd3', 'celular');
+  const ap = novoAparelho(null, 'celular'); // kid derivado da chave pública (Rodada 2, SE-B3 do dev B)
   const chavesArq = path.join(d, 'chaves-comandos.json');
   gravarChaves(chavesArq, [ap]);
   return { d, dirClaude, proj, projetosArq, ap, chavesArq, pastaEstado: path.join(d, 'estado'), token: crypto.randomBytes(32).toString('base64url') };
@@ -735,11 +742,11 @@ test('rodar com um servidor local falso: manda o retrato com orquestracao e trat
     modos: MODOS,
     maxSessoes: 4,
     abertas: 0,
-    aparelhos: [{ kid: 'ab2cd3', rotulo: 'celular' }],
+    aparelhos: [{ kid: amb.ap.kid, rotulo: 'celular' }],
   });
   assert.equal(painel.negados(), 0);
-  // Antes do primeiro envio, o laço conferiu os cinco arquivos do painel (S15), sem mandar o token.
-  assert.deepEqual([...painel.gets].sort(), [...ARQUIVOS_PAINEL].sort());
+  // Antes do primeiro envio, o laço conferiu todos os arquivos do painel e `/` (S15, S27), sem mandar o token.
+  assert.deepEqual([...painel.gets].sort(), PEDIDOS_DA_CONFERENCIA);
   // Todo corpo anuncia o protocolo novo (S22).
   assert.equal(painel.pedidos[0].protocolo, 2);
 
@@ -859,7 +866,7 @@ test('rodar grava em aparelhos-pedidos.json (600) só os pedidos de pareamento c
   await ate(() => painel.pedidos.length >= n + 2, 'mais dois ciclos');
   assert.equal(JSON.parse(fs.readFileSync(arq, 'utf8')).length, 1);
   // Os pedidos não autorizam nada: o chaveiro continua só com o aparelho do arquivo de chaves.
-  assert.deepEqual(painel.retratos().at(-1).orquestracao.aparelhos, [{ kid: 'ab2cd3', rotulo: 'celular' }]);
+  assert.deepEqual(painel.retratos().at(-1).orquestracao.aparelhos, [{ kid: amb.ap.kid, rotulo: 'celular' }]);
 });
 
 test('rodar: um painel que devolve comandos em toda resposta não faz o laço girar sem pausa', async (t) => {
@@ -901,13 +908,36 @@ async function iniciarColetor(t, amb, painel, extra = {}) {
   return { parar, logs };
 }
 
-test('conferirPainelPublicado compara o SHA-256 dos cinco arquivos servidos com os locais', async (t) => {
+test('conferirPainelPublicado compara o SHA-256 de todos os arquivos de public/ e de / com os locais', async (t) => {
   const publica = copiaPublica();
+  // Uma subpasta também entra na conferência.
+  fs.mkdirSync(path.join(publica, 'img'));
+  fs.writeFileSync(path.join(publica, 'img', 'icone.svg'), '<svg/>');
   const painel = await painelFalso(t, 'x', { publica });
   const conferir = () => conferirPainelPublicado({ url: painel.url, pastaPublica: publica, sinal: AbortSignal.timeout(10_000) });
   assert.deepEqual(await conferir(), { ok: true });
-  assert.deepEqual([...painel.gets].sort(), [...ARQUIVOS_PAINEL].sort());
+  // Rodada 2 (S27): todos os arquivos, em ordem, e `/` por último.
+  assert.deepEqual(painel.gets, [...arquivosDe(publica), '']);
+  assert.ok(painel.gets.includes('login.js') && painel.gets.includes('login.html') && painel.gets.includes('img/icone.svg'));
   assert.equal(painel.negados(), 0, 'sem token nos GET');
+
+  // login.js, login.html ou `/` servidos diferentes desligam (S27); arquivo da subpasta que não baixa também.
+  for (const nome of ['login.js', 'login.html']) {
+    painel.trocados.set(nome, Buffer.from('/* trocado */'));
+    assert.deepEqual(await conferir(), { ok: false, arquivo: nome, causa: 'diferente' });
+    painel.trocados.clear();
+  }
+  painel.trocados.set('', Buffer.from('<p>outra página na raiz</p>'));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: '/', causa: 'diferente' });
+  painel.trocados.clear();
+  painel.trocados.set('img/icone.svg', null);
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'img/icone.svg', causa: 'download' });
+  painel.trocados.clear();
+  // Com duas divergências, a primeira na ordem é a relatada (ordem determinística).
+  painel.trocados.set('style.css', Buffer.from('x'));
+  painel.trocados.set('cofre.js', Buffer.from('x'));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'cofre.js', causa: 'diferente' });
+  painel.trocados.clear();
 
   // Um byte a mais no app.js servido.
   painel.trocados.set('app.js', Buffer.concat([fs.readFileSync(path.join(publica, 'app.js')), Buffer.from(' ')]));
@@ -923,12 +953,14 @@ test('conferirPainelPublicado compara o SHA-256 dos cinco arquivos servidos com 
   painel.trocados.set('index.html', Buffer.alloc(6_000_000, 0x20));
   assert.deepEqual(await conferir(), { ok: false, arquivo: 'index.html', causa: 'download' });
   painel.trocados.clear();
-  // Arquivo local que falta também desliga (não há com o que comparar).
-  fs.rmSync(path.join(publica, 'assinatura.js'));
-  assert.deepEqual(await conferir(), { ok: false, arquivo: 'assinatura.js', causa: 'local' });
-  // Painel fora do ar.
+  // Sem index.html local, `/` não tem com o que comparar: desliga. Pasta pública que não existe também.
+  fs.rmSync(path.join(publica, 'index.html'));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: '/', causa: 'local' });
+  const semPasta = await conferirPainelPublicado({ url: painel.url, pastaPublica: path.join(publica, 'nao-existe'), sinal: AbortSignal.timeout(10_000) });
+  assert.deepEqual([semPasta.ok, semPasta.causa], [false, 'local']);
+  // Painel fora do ar: o primeiro arquivo da ordem não baixa.
   const fechado = await conferirPainelPublicado({ url: 'http://127.0.0.1:9', pastaPublica: PUBLICA, sinal: AbortSignal.timeout(10_000) });
-  assert.deepEqual([fechado.ok, fechado.arquivo, fechado.causa], [false, 'index.html', 'download']);
+  assert.deepEqual([fechado.ok, fechado.arquivo, fechado.causa], [false, ARQUIVOS_PAINEL[0], 'download']);
 });
 
 test('rodar com o painel publicado diferente de public/: comandos recusados com painel_alterado até a conferência bater', async (t) => {
@@ -1094,7 +1126,7 @@ test('main lê a configuração do ambiente, manda o retrato e sai limpo com SIG
     MOISES_MAX_SESSOES: '2',
     MOISES_INTERVALO_MS: '1000',
     MOISES_INTERVALO_RAPIDO_MS: '1000',
-    MOISES_TETO_SESSAO_USD: 'muito', // inválido: vale o padrão, com aviso
+    MOISES_TETO_SESSAO_USD: 'muito', // inválido: vale o limite mais restritivo, com aviso (Rodada 2, SE-M7)
   });
   const filho = spawn(process.execPath, [INDEX], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let saida = '';
@@ -1134,13 +1166,13 @@ function processoComConf(t, amb, linhasConf, extraEnv = {}) {
   return { filho, saida, fim };
 }
 
-test('MOISES_COMANDOS=0 e MOISES_SUBIR_TEXTO=0 escritos no coletor.env valem; o ambiente do processo vale por cima', async (t) => {
-  // 1. Só o arquivo: canal desligado e texto que não sobe.
+test('MOISES_COMANDOS=0 e MOISES_SUBIR_TEXTO=0 escritos no coletor.env valem; o ambiente do processo não os religa', async (t) => {
+  // 1. Só o arquivo (com comentário e export, S28): canal desligado e texto que não sobe.
   const amb = ambiente();
   const painel = await painelFalso(t, amb.token);
-  const linhas = (p, a) => [
+  const linhas = (p, a, desligar = ['MOISES_COMANDOS=0   # desligado de propósito', 'export MOISES_SUBIR_TEXTO=0']) => [
     `MOISES_URL=${p.url}`, `MOISES_TOKEN=${a.token}`, `MOISES_CHAVES_ARQ=${a.chavesArq}`, `MOISES_PROJETOS=${a.projetosArq}`,
-    'MOISES_INTERVALO_MS=1000', 'MOISES_INTERVALO_RAPIDO_MS=1000', 'MOISES_COMANDOS=0', 'MOISES_SUBIR_TEXTO=0',
+    'MOISES_INTERVALO_MS=1000', 'MOISES_INTERVALO_RAPIDO_MS=1000', ...desligar,
   ];
   const p1 = processoComConf(t, amb, linhas(painel, amb));
   const r = await ate(() => painel.retratos()[0], 'retrato do processo');
@@ -1149,10 +1181,20 @@ test('MOISES_COMANDOS=0 e MOISES_SUBIR_TEXTO=0 escritos no coletor.env valem; o 
   p1.filho.kill('SIGTERM');
   assert.deepEqual(await p1.fim, { codigo: 0, sinal: null });
 
-  // 2. MOISES_COMANDOS=1 no ambiente ganha do arquivo; o texto continua sem subir (pedido de permissão sem a entrada).
+  // 2. Rodada 2 (S28): MOISES_COMANDOS=1 no ambiente não religa o que o coletor.env desligou.
+  const amb1 = ambiente();
+  const painel1 = await painelFalso(t, amb1.token);
+  const p1b = processoComConf(t, amb1, linhas(painel1, amb1), { MOISES_COMANDOS: '1' });
+  const r1b = await ate(() => painel1.retratos()[0], 'retrato com o ambiente tentando religar');
+  assert.deepEqual([r1b.orquestracao.ativa, r1b.orquestracao.motivo], [false, 'desligado']);
+  p1b.filho.kill('SIGTERM');
+  assert.deepEqual(await p1b.fim, { codigo: 0, sinal: null });
+
+  // 3. Comandos ligados; MOISES_SUBIR_TEXTO=1 no ambiente não religa o texto que o arquivo desligou
+  // (pedido de permissão sem a entrada).
   const amb2 = ambiente();
   const painel2 = await painelFalso(t, amb2.token);
-  const p2 = processoComConf(t, amb2, linhas(painel2, amb2), { MOISES_COMANDOS: '1' });
+  const p2 = processoComConf(t, amb2, linhas(painel2, amb2, ['MOISES_SUBIR_TEXTO=desligado']), { MOISES_SUBIR_TEXTO: '1' });
   const r2 = await ate(() => painel2.retratos()[0], 'retrato do segundo processo');
   assert.deepEqual([r2.orquestracao.ativa, r2.orquestracao.motivo], [true, null]);
   assert.match(p2.saida.texto, /comandos: ligados; texto: não sobe/);

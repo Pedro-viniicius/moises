@@ -128,16 +128,21 @@ async function main() {
   }
   const estado = async () => (await http('GET', '/api/estado')).j;
 
-  async function ate(descricao, fn, ms = 60_000) {
+  // `nota` (opcional) diz o que foi visto por último; vai na mensagem de tempo esgotado, com o último erro.
+  async function ate(descricao, fn, ms = 60_000, nota = () => null) {
     const limite = Date.now() + ms;
+    let ultimoErro = null;
     while (Date.now() < limite) {
       try {
         const v = await fn();
         if (v) return v;
-      } catch { /* tenta de novo */ }
+      } catch (err) {
+        ultimoErro = err?.message ?? String(err); // tenta de novo
+      }
       await espera(500);
     }
-    throw new Error(`tempo esgotado esperando: ${descricao}`);
+    const extra = [nota(), ultimoErro && `último erro: ${ultimoErro}`].filter(Boolean).join('; ');
+    throw new Error(`tempo esgotado esperando: ${descricao}${extra ? ` (${extra})` : ''}`);
   }
 
   let chave = null;
@@ -156,13 +161,20 @@ async function main() {
   async function enviar(cmd) {
     const r = await http('POST', '/api/comando', cmd);
     if (r.status !== 200) throw new Error(`POST /api/comando (${cmd.tipo}) respondeu ${r.status}: ${r.j?.erro}`);
+    if (VERBOSO) console.error(new Date().toISOString().slice(11, 23), '[e2e] enviado', cmd.tipo, cmd.id);
     return cmd.id;
   }
   const comando = async (tipo, sessaoAlvo, dados) => enviar(await assinarComando(aparelho, { tipo, chave: sessaoAlvo, dados }));
-  const comandoTerminou = (id, ms = 60_000) => ate(`comando ${id} terminar`, async () => {
-    const cmd = (await estado()).comandos.find((x) => x.id === id);
-    return cmd && ['feito', 'falhou', 'recusado', 'expirado'].includes(cmd.estado) ? cmd : null;
-  }, ms);
+  const comandoTerminou = (id, ms = 60_000) => {
+    let visto = 'nenhuma leitura do estado';
+    return ate(`comando ${id} terminar`, async () => {
+      const cmd = (await estado()).comandos.find((x) => x.id === id);
+      const agora = cmd ? `último estado visto: ${cmd.estado}` : 'comando ausente da lista';
+      if (VERBOSO && agora !== visto) console.error(new Date().toISOString().slice(11, 23), '[e2e]', id, agora);
+      visto = agora;
+      return cmd && ['feito', 'falhou', 'recusado', 'expirado'].includes(cmd.estado) ? cmd : null;
+    }, ms, () => visto);
+  };
   async function comandoFeito(id, ms) {
     const c = await comandoTerminou(id, ms);
     if (c.estado !== 'feito') throw new Error(`comando ${c.tipo} terminou como ${c.estado}: ${c.erro}`);
@@ -221,7 +233,7 @@ async function main() {
     tetoSessaoUsd: 0.3,
     ideiasTetoDia: 0,
     argsExtra: ['--system-prompt=Você é um assistente de teste. Use a ferramenta Bash exatamente como pedido, sem comentar. Respostas de uma linha.'],
-    log: VERBOSO ? (...a) => console.error('[coletor]', ...a) : () => {},
+    log: VERBOSO ? (...a) => console.error(new Date().toISOString().slice(11, 23), '[coletor]', ...a) : () => {},
   });
   await ate('coletor mandar o primeiro retrato com a orquestração ativa', async () => (await estado()).retrato?.orquestracao?.ativa === true, 30_000);
   log(`painel local em ${base}; sessão de teste: ${NOME}; sandbox: ${SANDBOX}`);
@@ -269,8 +281,8 @@ async function main() {
   });
 
   await item(5, 'interromper e encerrar', async () => {
-    await mensagem('Rode com a ferramenta Bash: python3 -c "import time; time.sleep(45)"');
-    const p = await pedidoDePermissao('time.sleep(45)');
+    await mensagem('Rode com a ferramenta Bash: sleep 45');
+    const p = await pedidoDePermissao('sleep 45');
     await comandoFeito(await responder(p, 'aprovar'));
     await sessaoEm((x) => x.estado === 'trabalhando', 'sessão trabalhando no comando longo', 30_000);
     await espera(2000);

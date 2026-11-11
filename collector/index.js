@@ -29,8 +29,9 @@ const ENVIO_FINAL_MS = 5_000; // parar(): tempo para mandar as últimas confirma
 const ARQ_PEDIDOS_APARELHOS = 'aparelhos-pedidos.json';
 const MAX_PEDIDOS_APARELHOS = 5;
 const ESTADOS_OCUPADOS = ['trabalhando', 'esperando_permissao'];
-// Integridade do painel publicado (S15): os arquivos que montam e assinam comandos no aparelho.
-const ARQUIVOS_PAINEL = ['index.html', 'app.js', 'assinatura.js', 'cofre.js', 'style.css'];
+// Integridade do painel publicado (S15, S27): todos os arquivos de public/ (com as subpastas) e o caminho `/`.
+// O resultado de cada conferência vai para <estado>/painel-conferencia.json, que o --autorizar consulta.
+const ARQ_CONFERENCIA = 'painel-conferencia.json';
 const CONFERIR_PAINEL_MS = 10 * 60_000;
 const CONFERIR_PAINEL_TEMPO_MS = 15_000;
 const MAX_ARQUIVO_PAINEL = 5_000_000;
@@ -39,8 +40,8 @@ const PAINEL_ALTERADO = Object.freeze({
   motivo: 'painel_alterado',
   erro: 'O painel publicado é diferente do código deste computador; comandos desligados.',
 });
-// Chaves de desligar que também valem escritas no coletor.env (o ambiente do processo vale por cima).
-const CHAVES_DE_DESLIGAR = ['MOISES_COMANDOS', 'MOISES_SUBIR_TEXTO', 'MOISES_ENCERRAR', 'MOISES_ENCERRAR_POR_HORA'];
+// Chaves de desligar (S28): valem no coletor.env e no ambiente, e basta uma das fontes dizer desligado.
+const CHAVES_DE_DESLIGAR = ['MOISES_COMANDOS', 'MOISES_SUBIR_TEXTO', 'MOISES_ENCERRAR', 'MOISES_CONFERIR_PAINEL'];
 const RE_NOME_PROJETO = /^[A-Za-z0-9._-]{1,60}$/;
 const RE_ID = /^c_[0-9a-f]{16}$/;
 const RE_FERRAMENTA = /^[A-Za-z]{1,30}$/;
@@ -133,20 +134,45 @@ async function baixarDoPainel(endereco, sinal) {
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
-// Confere se os arquivos que o painel publicado serve são os de `pastaPublica` (S15). Devolve
-// {ok: true} ou {ok: false, arquivo, causa}, com causa 'local' (arquivo local ilegível), 'download'
-// (não baixou) ou 'diferente'. Nunca lança.
+// Arquivos de `pasta` e das subpastas, como caminhos relativos com '/', em ordem. Lança se a pasta não
+// puder ser lida.
+function arquivosDoPainel(pasta) {
+  const nomes = [];
+  for (const nome of fs.readdirSync(pasta, { recursive: true })) {
+    let ehArquivo = false;
+    try {
+      ehArquivo = fs.statSync(path.join(pasta, nome)).isFile();
+    } catch {
+      ehArquivo = true; // some entre a lista e a leitura: a leitura do conteúdo falha e desliga
+    }
+    if (ehArquivo) nomes.push(nome.split(path.sep).join('/'));
+  }
+  return nomes.sort();
+}
+
+// Confere se o que o painel publicado serve é o que está em `pastaPublica` (S15, S27): cada arquivo da pasta
+// e das subpastas, em ordem, e depois `/` contra index.html. Devolve {ok: true} ou {ok: false, arquivo,
+// causa}, com causa 'local' (pasta ou arquivo local ilegível), 'download' (não baixou) ou 'diferente'.
+// `arquivo` é o caminho relativo ('/' para a raiz). Nunca lança.
 export async function conferirPainelPublicado({ url, pastaPublica = PASTA_PUBLICA, sinal }) {
-  for (const arquivo of ARQUIVOS_PAINEL) {
+  let lista;
+  try {
+    lista = arquivosDoPainel(pastaPublica);
+  } catch {
+    return { ok: false, arquivo: '.', causa: 'local' };
+  }
+  const alvos = lista.map((nome) => ({ arquivo: nome, local: nome, caminho: `/${nome.split('/').map(encodeURIComponent).join('/')}` }));
+  alvos.push({ arquivo: '/', local: 'index.html', caminho: '/' });
+  for (const { arquivo, local: nomeLocal, caminho } of alvos) {
     let local;
     try {
-      local = sha256(fs.readFileSync(path.join(pastaPublica, arquivo)));
+      local = sha256(fs.readFileSync(path.join(pastaPublica, nomeLocal)));
     } catch {
       return { ok: false, arquivo, causa: 'local' };
     }
     let servido;
     try {
-      servido = sha256(await baixarDoPainel(new URL(`/${arquivo}`, url), sinal));
+      servido = sha256(await baixarDoPainel(new URL(caminho, url), sinal));
     } catch {
       return { ok: false, arquivo, causa: 'download' };
     }
@@ -251,10 +277,10 @@ function textoDosPedidos(lista) {
   return { validos: validos.length, texto: `${JSON.stringify(validos)}\n` };
 }
 
-// Grava o texto em <pastaEstado>/aparelhos-pedidos.json (600, por temporário e rename). Lança só com o
-// código do erro de disco (nada do conteúdo).
-function gravarPedidosAparelhos(pastaEstado, texto) {
-  const arquivo = path.join(pastaEstado, ARQ_PEDIDOS_APARELHOS);
+// Grava o texto em <pastaEstado>/<nome> (600, por temporário e rename). Lança só com o código do erro de
+// disco (nada do conteúdo); `oQue` diz o que era, para o log.
+function gravarNoEstado(pastaEstado, nome, texto, oQue) {
+  const arquivo = path.join(pastaEstado, nome);
   const tmp = `${arquivo}.${process.pid}.tmp`;
   let fd = null;
   try {
@@ -272,7 +298,7 @@ function gravarPedidosAparelhos(pastaEstado, texto) {
     } catch {
       /* nada a limpar */
     }
-    throw new ErroDoPainel(`não foi possível gravar os pedidos de pareamento (${err?.code || 'erro'})`);
+    throw new ErroDoPainel(`não foi possível gravar ${oQue} (${err?.code || 'erro'})`);
   }
 }
 
@@ -337,8 +363,11 @@ export async function rodar({
   const porteiro = new Porteiro({ chaveiro, pastaEstado, auditoria });
   // Relida a cada uso: abrir sempre vê a lista atual.
   const projetos = () => lerProjetos(projetosArq);
+  // Pastas que as sessões comandadas não podem ler nem editar (SE-M5b): as chaves dos aparelhos, a lista de
+  // projetos e o estado do coletor, onde quer que a configuração as ponha.
+  const protegidos = [...new Set([path.dirname(path.resolve(chavesArq)), path.dirname(path.resolve(projetosArq)), path.resolve(pastaEstado)])];
   const orquestrador = new Orquestrador({
-    coletor, projetos, pastaEstado, claudeBin, argsExtra, ferramentas, tetoSessaoUsd, maxSessoes, maxAbrirPorDia, permissaoExpiraMs, soPrefixo: prefixo,
+    coletor, projetos, pastaEstado, claudeBin, argsExtra, ferramentas, tetoSessaoUsd, maxSessoes, maxAbrirPorDia, permissaoExpiraMs, soPrefixo: prefixo, protegidos,
   });
 
   // Painel publicado diferente de public/ (ou que não baixou): comandos desligados até a próxima
@@ -388,6 +417,7 @@ export async function rodar({
   let acordarLogo = false;
   let pedidosGravados = null; // texto do último aparelhos-pedidos.json gravado (só regrava se mudar)
   let falhaPedidos = null; // última falha ao gravá-lo, para não repetir a mesma linha no log
+  let falhaConferencia = null; // idem, para painel-conferencia.json
 
   const acordar = () => {
     if (despertar) despertar();
@@ -416,6 +446,7 @@ export async function rodar({
     const sinal = AbortSignal.any([AbortSignal.timeout(CONFERIR_PAINEL_TEMPO_MS), cancelar.signal]);
     const r = await conferirPainelPublicado({ url, pastaPublica, sinal });
     if (parado) return;
+    registrarConferencia(r);
     const alterado = !r.ok;
     if (alterado && !painelAlterado) {
       const porque = { diferente: 'é diferente de public/', download: 'não pôde ser baixado', local: 'não existe em public/ deste computador' }[r.causa];
@@ -440,6 +471,20 @@ export async function rodar({
     }
   }
 
+  // Resultado da conferência para o --autorizar (A1-resto): {ok, em} e, se divergiu, arquivo e causa;
+  // nada do conteúdo servido. Falha de disco vai para o log uma vez; o laço segue.
+  function registrarConferencia(r) {
+    const registro = r.ok ? { ok: true, em: Date.now() } : { ok: false, em: Date.now(), arquivo: r.arquivo, causa: r.causa };
+    try {
+      gravarNoEstado(pastaEstado, ARQ_CONFERENCIA, `${JSON.stringify(registro)}\n`, 'o resultado da conferência do painel');
+      falhaConferencia = null;
+    } catch (err) {
+      const msg = descreverErro(err);
+      if (msg !== falhaConferencia) erro(`[coletor] ${msg}`);
+      falhaConferencia = msg;
+    }
+  }
+
   // Resposta sem a lista (servidor antigo) não mexe no arquivo; lista igual à última gravada não regrava.
   // Falha de disco vai para o log uma vez (tenta de novo a cada ciclo). Nada do conteúdo vai para o log.
   function repassarPedidos(lista) {
@@ -447,7 +492,7 @@ export async function rodar({
     const { validos, texto } = textoDosPedidos(lista);
     if (texto === pedidosGravados) return;
     try {
-      gravarPedidosAparelhos(pastaEstado, texto);
+      gravarNoEstado(pastaEstado, ARQ_PEDIDOS_APARELHOS, texto, 'os pedidos de pareamento');
       pedidosGravados = texto;
       falhaPedidos = null;
       if (validos) info(`[coletor] ${validos} pedido(s) de autorização de aparelho; confira com configurar-comandos.js --pedidos`);
@@ -525,6 +570,8 @@ export async function rodar({
       `(${intervaloRapidoMs / 1000}s com o painel aberto); comandos: ${ativa ? 'ligados' : `desligados (${motivo})`}; texto: ${texto}; ` +
       `conferência do painel: ${conferirPainel ? `a cada ${Math.round(conferirPainelMs / 60_000)} min` : 'desligada'}`,
   );
+  // O mesmo arquivo que o configurar-comandos.js usa (SE-M4); só o caminho e a contagem, nunca as chaves.
+  info(`[coletor] chaves dos aparelhos em ${path.resolve(chavesArq)}: ${chaveiro.aparelhos().length} carregada(s)`);
 
   // Confirmações que ficaram na fila (resultado de execução encerrada agora): uma tentativa, com tempo
   // limite, só com os acks. Os comandos que vierem na resposta ficam para o próximo coletor.
@@ -558,67 +605,186 @@ export async function rodar({
 
 // ---------- configuração de produção ----------
 
-function lerConf(arquivo) {
-  const out = {};
-  try {
-    for (const l of fs.readFileSync(arquivo, 'utf8').split('\n')) {
-      const m = l.match(/^\s*([A-Z_]+)\s*=\s*(.*)\s*$/);
-      if (m) out[m[1]] = m[2].replace(/^["']|["']$/g, '');
-    }
-  } catch {
-    /* sem arquivo: usa variáveis de ambiente */
+// Chaves que o coletor lê do coletor.env. Outra MOISES_* no arquivo gera aviso: um erro de digitação numa
+// chave de desligar não pode deixar tudo ligado em silêncio (S28).
+const CHAVES_DO_ARQUIVO = new Set([
+  'MOISES_URL', 'MOISES_TOKEN', 'MOISES_ESTADO', 'MOISES_CHAVES_ARQ', 'MOISES_PROJETOS', 'MOISES_INTERVALO_MS',
+  'MOISES_INTERVALO_RAPIDO_MS', 'MOISES_MAX_SESSOES', 'MOISES_MAX_ABRIR_DIA', 'MOISES_TETO_SESSAO_USD', 'MOISES_FERRAMENTAS',
+  'MOISES_PERMISSAO_EXPIRA_MIN', 'MOISES_SO_PREFIXO', 'MOISES_ENCERRAR_POR_HORA', ...CHAVES_DE_DESLIGAR,
+]);
+const VALORES_DESLIGADO = new Set(['0', 'false', 'off', 'nao', 'não', 'desligado']);
+const VALORES_LIGADO = new Set(['1', 'true', 'on', 'sim', 'ligado']);
+const RE_LINHA_CONF = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+const avisarNoLog = (m) => console.error(m);
+
+// Valor de uma linha do coletor.env: entre aspas (simples ou duplas), o que está dentro, e o resto da linha
+// é ignorado; sem aspas, até um `#` precedido de espaço (comentário), aparado.
+function valorDaLinha(bruto) {
+  const aparado = bruto.trim();
+  const aspas = aparado[0];
+  if (aspas === '"' || aspas === "'") {
+    const fim = aparado.indexOf(aspas, 1);
+    if (fim > 0) return aparado.slice(1, fim);
   }
+  const comentario = bruto.search(/\s#/);
+  return (comentario >= 0 ? bruto.slice(0, comentario) : bruto).trim();
+}
+
+// Lê o coletor.env: { CHAVE: valor }. Linha que não se entende e chave MOISES_* desconhecida geram aviso com
+// o número da linha ou o nome da chave, nunca o valor (pode ser o token). Arquivo ausente vale vazio.
+function lerConf(arquivo, avisar = avisarNoLog) {
+  const out = Object.create(null);
+  let texto;
+  try {
+    texto = fs.readFileSync(arquivo, 'utf8');
+  } catch (err) {
+    if (err?.code !== 'ENOENT') avisar(`[coletor] não foi possível ler ${arquivo} (${err?.code || 'erro'}); usando só o ambiente.`);
+    return out;
+  }
+  texto.split('\n').forEach((linha, i) => {
+    if (!linha.trim() || linha.trim().startsWith('#')) return;
+    const m = linha.match(RE_LINHA_CONF);
+    if (!m) {
+      avisar(`[coletor] linha ${i + 1} do coletor.env não foi entendida (esperado CHAVE=valor); ignorada.`);
+      return;
+    }
+    const [, chave, bruto] = m;
+    if (/^moises_/i.test(chave) && !CHAVES_DO_ARQUIVO.has(chave)) {
+      avisar(`[coletor] chave desconhecida no coletor.env: ${chave} (ignorada; confira o nome).`);
+      return;
+    }
+    out[chave] = valorDaLinha(bruto);
+  });
   return out;
 }
 
-// Número do ambiente ou do coletor.env, dentro dos limites; fora deles vale o padrão, com um aviso
-// que não repete o valor.
-function numeroEntre(valor, nome, padrao, min, max, inteiro = true) {
-  if (valor === undefined || valor === '') return padrao;
-  const n = Number(valor);
+// Valor de uma chave de desligar: '0' (desligado), '1' (ligado), null (não reconhecido) ou undefined (ausente).
+function valorDaChave(valor) {
+  if (typeof valor !== 'string' || !valor.trim()) return undefined;
+  const normal = valor.trim().normalize('NFC').toLowerCase();
+  if (VALORES_DESLIGADO.has(normal)) return '0';
+  if (VALORES_LIGADO.has(normal)) return '1';
+  return null;
+}
+
+// Junta o ambiente e o coletor.env de uma chave de desligar: basta uma fonte dizer desligado; valor não
+// reconhecido também desliga, com aviso que cita a chave e não o valor. undefined se nenhuma fonte a define.
+function chaveDeDesligar(nome, doAmbiente, doArquivo, avisar) {
+  const valores = [doAmbiente, doArquivo].map(valorDaChave);
+  if (valores.includes(null)) {
+    avisar(`[coletor] valor não reconhecido em ${nome} (aceito: 0, false, off, nao, não, desligado ou 1, true, on, sim, ligado); vale desligado.`);
+    return '0';
+  }
+  if (valores.includes('0')) return '0';
+  if (valores.includes('1')) return '1';
+  return undefined;
+}
+
+const numeroParaTexto = (n) => String(n).replace('.', ',');
+
+// Número do ambiente ou do coletor.env, dentro dos limites; aceita vírgula decimal (0,50). Inválido ou fora
+// da faixa: um teto vale o limite mais restritivo (o mínimo da faixa) e os demais o padrão, com um aviso que
+// não repete o valor (SE-M7).
+function numeroEntre(valor, nome, padrao, min, max, { inteiro = true, teto = false, avisar = avisarNoLog } = {}) {
+  if (valor === undefined) return padrao;
+  const texto = String(valor).trim();
+  if (texto === '') return padrao;
+  const n = /^[0-9]+(?:[.,][0-9]+)?$/.test(texto) ? Number(texto.replace(',', '.')) : NaN;
   if (Number.isFinite(n) && n >= min && n <= max && (!inteiro || Number.isInteger(n))) return n;
-  console.error(`[coletor] valor inválido em ${nome} (aceito: ${min} a ${max}); usando o padrão ${padrao}.`);
+  const faixa = `aceito: ${numeroParaTexto(min)} a ${numeroParaTexto(max)}`;
+  if (teto) {
+    avisar(`[coletor] valor inválido em ${nome} (${faixa}); usando o limite mais restritivo, ${numeroParaTexto(min)}.`);
+    return min;
+  }
+  avisar(`[coletor] valor inválido em ${nome} (${faixa}); usando o padrão ${numeroParaTexto(padrao)}.`);
   return padrao;
 }
 
-function listaDeFerramentas(valor) {
-  if (valor === undefined || valor === '') return FERRAMENTAS_PADRAO;
-  const lista = valor.split(',').map((f) => f.trim()).filter(Boolean);
-  if (lista.length && lista.every((f) => RE_FERRAMENTA.test(f))) return lista;
-  console.error(`[coletor] valor inválido em MOISES_FERRAMENTAS; usando o padrão ${FERRAMENTAS_PADRAO.join(',')}.`);
+// MOISES_FERRAMENTAS só reduz a lista padrão (SE-M2): nome fora dela é ignorado, com aviso; lista que
+// fica vazia volta à padrão, com aviso. A ordem é a da lista padrão.
+function listaDeFerramentas(valor, avisar = avisarNoLog) {
+  if (valor === undefined || !String(valor).trim()) return FERRAMENTAS_PADRAO;
+  const pedidas = new Set(String(valor).split(',').map((f) => f.trim()).filter(Boolean));
+  const fora = [...pedidas].filter((f) => !FERRAMENTAS_PADRAO.includes(f));
+  if (fora.length) {
+    const nomes = fora.filter((f) => RE_FERRAMENTA.test(f));
+    const outros = fora.length - nomes.length;
+    const citados = [...nomes, ...(outros ? [`${outros} nome(s) fora do formato`] : [])].join(', ');
+    avisar(`[coletor] MOISES_FERRAMENTAS só pode reduzir a lista ${FERRAMENTAS_PADRAO.join(',')}; ignorados: ${citados}.`);
+  }
+  const lista = FERRAMENTAS_PADRAO.filter((f) => pedidas.has(f));
+  if (lista.length) return lista;
+  avisar(`[coletor] MOISES_FERRAMENTAS ficou sem nenhuma ferramenta da lista; usando o padrão ${FERRAMENTAS_PADRAO.join(',')}.`);
   return FERRAMENTAS_PADRAO;
 }
 
-// coletor.env (ou o ambiente, que tem precedência). A chave de comandos nunca vem daqui: só o
-// caminho do arquivo dela. As chaves de desligar vão para process.env, que é onde os módulos as leem.
-function configuracao() {
-  const home = os.homedir();
-  const arquivo = process.env.MOISES_CONF || path.join(home, '.config/moises/coletor.env');
-  const doArquivo = lerConf(arquivo);
-  const v = (k) => process.env[k] || doArquivo[k] || undefined;
-  for (const k of CHAVES_DE_DESLIGAR) if (!process.env[k] && doArquivo[k] !== undefined) process.env[k] = doArquivo[k];
+// Caminho de arquivo ou pasta da configuração: absoluto, ou ~/ relativo à pasta pessoal. Relativo
+// dependeria da pasta de onde se roda (coletor e script veriam arquivos diferentes): vale o padrão, com aviso.
+function caminhoDaConf(valor, nome, padrao, home, avisar) {
+  if (typeof valor !== 'string' || !valor.trim()) return padrao;
+  const v = valor.trim();
+  if (v === '~' || v.startsWith('~/')) return path.join(home, v.slice(1));
+  if (path.isAbsolute(v)) return path.resolve(v);
+  avisar(`[coletor] ${nome} precisa ser um caminho absoluto (ou começar com ~/); usando o padrão ${padrao}.`);
+  return padrao;
+}
+
+// Lê o coletor.env (MOISES_CONF, ou coletor.env na pasta de configuração) e resolve os caminhos. A pasta de
+// configuração é MOISES_PASTA_CONF (padrão ~/.config/moises). O ambiente vale por cima do arquivo.
+function lerLocal({ env, home, avisar }) {
+  const pastaConf = caminhoDaConf(env.MOISES_PASTA_CONF, 'MOISES_PASTA_CONF', path.join(home, '.config/moises'), home, avisar);
+  const arquivo = caminhoDaConf(env.MOISES_CONF, 'MOISES_CONF', path.join(pastaConf, 'coletor.env'), home, avisar);
+  const doArquivo = lerConf(arquivo, avisar);
+  const v = (k) => env[k] || doArquivo[k] || undefined;
+  const caminhos = {
+    pastaEstado: caminhoDaConf(v('MOISES_ESTADO'), 'MOISES_ESTADO', path.join(home, '.local/state/moises'), home, avisar),
+    chavesArq: caminhoDaConf(v('MOISES_CHAVES_ARQ'), 'MOISES_CHAVES_ARQ', path.join(pastaConf, 'chaves-comandos.json'), home, avisar),
+    projetosArq: caminhoDaConf(v('MOISES_PROJETOS'), 'MOISES_PROJETOS', path.join(pastaConf, 'projetos.json'), home, avisar),
+  };
+  return { pastaConf, arquivo, doArquivo, v, caminhos };
+}
+
+// Onde o coletor procura cada arquivo, pela mesma regra que ele usa ao iniciar (SE-M4): o
+// configurar-comandos.js usa esta função para autorizar e revogar no arquivo que o coletor lê. Devolve só
+// caminhos absolutos e se a conferência do painel está ligada; nada do conteúdo do coletor.env.
+export function caminhosDoColetor({ env = process.env, home = os.homedir(), avisar = avisarNoLog } = {}) {
+  const { pastaConf, arquivo, doArquivo, caminhos } = lerLocal({ env, home, avisar });
+  const conferir = chaveDeDesligar('MOISES_CONFERIR_PAINEL', env.MOISES_CONFERIR_PAINEL, doArquivo.MOISES_CONFERIR_PAINEL, avisar);
+  return { arquivoConf: arquivo, pastaConf, ...caminhos, conferirPainel: conferir !== '0' };
+}
+
+// coletor.env (ou o ambiente, que tem precedência nos valores). A chave de comandos nunca vem daqui: só o
+// caminho do arquivo dela. As chaves de desligar e o teto de encerramentos vão para `env` (process.env),
+// na forma canônica, que é onde os módulos os leem.
+export function configuracao({ env = process.env, home = os.homedir(), avisar = avisarNoLog } = {}) {
+  const { arquivo, doArquivo, v, caminhos } = lerLocal({ env, home, avisar });
+  for (const k of CHAVES_DE_DESLIGAR) {
+    const valor = chaveDeDesligar(k, env[k], doArquivo[k], avisar);
+    if (valor !== undefined) env[k] = valor;
+  }
+  const porHora = v('MOISES_ENCERRAR_POR_HORA');
+  if (porHora !== undefined) env.MOISES_ENCERRAR_POR_HORA = String(numeroEntre(porHora, 'MOISES_ENCERRAR_POR_HORA', 5, 0, 1000, { teto: true, avisar }));
+  const numero = (k, padrao, min, max, opcoes = {}) => numeroEntre(v(k), k, padrao, min, max, { avisar, ...opcoes });
   return {
     arquivo,
     url: v('MOISES_URL'),
     token: v('MOISES_TOKEN'),
-    pastaEstado: process.env.MOISES_ESTADO || path.join(home, '.local/state/moises'),
-    chavesArq: v('MOISES_CHAVES_ARQ') || path.join(home, '.config/moises/chaves-comandos.json'),
-    projetosArq: v('MOISES_PROJETOS') || path.join(home, '.config/moises/projetos.json'),
-    intervaloMs: numeroEntre(v('MOISES_INTERVALO_MS'), 'MOISES_INTERVALO_MS', 20_000, 1000, 3_600_000),
-    intervaloRapidoMs: numeroEntre(v('MOISES_INTERVALO_RAPIDO_MS'), 'MOISES_INTERVALO_RAPIDO_MS', 3_000, 1000, 60_000),
-    maxSessoes: numeroEntre(v('MOISES_MAX_SESSOES'), 'MOISES_MAX_SESSOES', 4, 1, 50),
-    maxAbrirPorDia: numeroEntre(v('MOISES_MAX_ABRIR_DIA'), 'MOISES_MAX_ABRIR_DIA', 20, 0, 1000),
-    tetoSessaoUsd: numeroEntre(v('MOISES_TETO_SESSAO_USD'), 'MOISES_TETO_SESSAO_USD', 5, 0.01, 100, false),
-    ferramentas: listaDeFerramentas(v('MOISES_FERRAMENTAS')),
-    permissaoExpiraMs: numeroEntre(v('MOISES_PERMISSAO_EXPIRA_MIN'), 'MOISES_PERMISSAO_EXPIRA_MIN', 30, 1, 1440) * 60_000,
+    ...caminhos,
+    intervaloMs: numero('MOISES_INTERVALO_MS', 20_000, 1000, 3_600_000),
+    intervaloRapidoMs: numero('MOISES_INTERVALO_RAPIDO_MS', 3_000, 1000, 60_000),
+    maxSessoes: numero('MOISES_MAX_SESSOES', 4, 0, 50, { teto: true }),
+    maxAbrirPorDia: numero('MOISES_MAX_ABRIR_DIA', 20, 0, 1000, { teto: true }),
+    tetoSessaoUsd: numero('MOISES_TETO_SESSAO_USD', 5, 0.01, 100, { inteiro: false, teto: true }),
+    ferramentas: listaDeFerramentas(v('MOISES_FERRAMENTAS'), avisar),
+    permissaoExpiraMs: numero('MOISES_PERMISSAO_EXPIRA_MIN', 30, 1, 1440, { teto: true }) * 60_000,
     soPrefixo: v('MOISES_SO_PREFIXO') || null,
-    conferirPainel: v('MOISES_CONFERIR_PAINEL') !== '0',
+    conferirPainel: env.MOISES_CONFERIR_PAINEL !== '0',
   };
 }
 
 async function main() {
   if (process.argv.includes('--uma-vez')) {
-    const pastaEstado = process.env.MOISES_ESTADO || path.join(os.homedir(), '.local/state/moises');
+    const { pastaEstado } = caminhosDoColetor();
     const coletor = new Coletor({ ignorarCwds: [pastaEstado] });
     const ideias = new Ideias({ pastaEstado });
     console.log(JSON.stringify(ideias.aplicar(coletor.retrato()), null, 2));

@@ -177,10 +177,12 @@ test('CA3: pareamento de ponta a ponta com o servidor, o coletor, o script e o m
   assert.equal(fs.statSync(arqPedidos).mode & 0o777, 0o600);
   assert.equal(fs.statSync(pc.estado).mode & 0o777, 0o700, 'pasta de estado só do dono (Q2)');
 
-  // O script mostra a mesma impressão digital que o aparelho mostra e nunca imprime a chave pública.
+  // O script lista o pedido sem a impressão digital nem a chave pública. Rodada de correção 2 (SE-M3): a
+  // impressão vem do aparelho (aqui, o módulo do navegador: ap.impressao), como o dono a lê na tela e digita.
   const lista = pc.script('--pedidos');
   assert.equal(lista.status, 0, lista.stderr);
-  assert.ok(lista.stdout.includes(ap.kid) && lista.stdout.includes('celular do QA') && lista.stdout.includes(ap.impressao), lista.stdout);
+  assert.ok(lista.stdout.includes(ap.kid) && lista.stdout.includes('celular do QA'), lista.stdout);
+  assert.ok(!(lista.stdout + lista.stderr).includes(ap.impressao), 'a impressão digital não sai do terminal');
   assert.ok(!(lista.stdout + lista.stderr).includes(ap.publica));
 
   // Sem a impressão digital, ou com a de outro aparelho, nada é gravado.
@@ -445,16 +447,17 @@ test('POST /api/aparelho recusa chave pública que não começa por 0x04, mesmo 
 
 // ---------------------------------------------------------------- S15: agenda da conferência e chave de desligar
 
-// Painel que só conta o que o coletor pede: serve os arquivos de public/ (ou 404, se `servir` for falso) e responde
-// ao ingest sem comandos. `gets` = nomes pedidos, `retratos` = retratos recebidos.
+// Painel que só conta o que o coletor pede: serve os arquivos de public/ e `/` como index.html (ou 404, se `servir`
+// for falso) e responde ao ingest sem comandos. `gets` = nomes pedidos ('' é `/`), `retratos` = retratos recebidos.
 async function painelContador(t, { servir = true } = {}) {
   const gets = [];
   const retratos = [];
   const servidor = http.createServer((req, res) => {
     if (req.method === 'GET') {
       gets.push(req.url.slice(1));
-      const arq = path.join(RAIZ, 'public', req.url.slice(1));
-      if (!servir || !fs.existsSync(arq)) return res.writeHead(404).end();
+      // Rodada de correção 2 (S27): o coletor também confere `/`, que a Vercel serve como index.html.
+      const arq = path.join(RAIZ, 'public', req.url === '/' ? 'index.html' : req.url.slice(1));
+      if (!servir || !fs.existsSync(arq) || !fs.statSync(arq).isFile()) return res.writeHead(404).end();
       return res.writeHead(200).end(fs.readFileSync(arq));
     }
     let corpo = '';
@@ -472,7 +475,12 @@ async function painelContador(t, { servir = true } = {}) {
   });
   return { url: `http://127.0.0.1:${servidor.address().port}`, token: crypto.randomBytes(32).toString('base64url'), gets, retratos };
 }
-const CINCO = ['app.js', 'assinatura.js', 'cofre.js', 'index.html', 'style.css'];
+// Rodada de correção 2 (S27): todos os arquivos de public/ (com as subpastas) e `/` (''), não mais os cinco fixos.
+const PUBLICOS = path.join(RAIZ, 'public');
+const CINCO = [
+  ...fs.readdirSync(PUBLICOS, { recursive: true }).map((n) => n.split(path.sep).join('/')).filter((n) => fs.statSync(path.join(PUBLICOS, n)).isFile()),
+  '',
+].sort();
 
 test('S15: a conferência do painel publicado acontece no início e só de novo depois do intervalo configurado', async (t) => {
   const pc = computador();
@@ -480,7 +488,7 @@ test('S15: a conferência do painel publicado acontece no início e só de novo 
   const painel = await painelContador(t);
   await iniciarColetor(t, pc, painel, { conferirPainelMs: 60_000 });
   await ate(() => painel.retratos.length >= 1, 'primeiro retrato');
-  assert.deepEqual([...painel.gets].sort(), CINCO, 'os cinco arquivos, uma vez, antes do primeiro envio');
+  assert.deepEqual([...painel.gets].sort(), CINCO, 'todos os arquivos e `/`, uma vez, antes do primeiro envio');
   // Vários ciclos depois (200 ms de piso entre ciclos), nenhuma conferência nova.
   await espera(1200);
   assert.deepEqual([...painel.gets].sort(), CINCO);
