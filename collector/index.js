@@ -641,7 +641,7 @@ function lerConf(arquivo, avisar = avisarNoLog) {
     if (err?.code !== 'ENOENT') avisar(`[coletor] não foi possível ler ${arquivo} (${err?.code || 'erro'}); usando só o ambiente.`);
     return out;
   }
-  texto.split('\n').forEach((linha, i) => {
+  texto.split(/\r?\n/).forEach((linha, i) => {
     if (!linha.trim() || linha.trim().startsWith('#')) return;
     const m = linha.match(RE_LINHA_CONF);
     if (!m) {
@@ -667,12 +667,18 @@ function valorDaChave(valor) {
   return null;
 }
 
-// Junta o ambiente e o coletor.env de uma chave de desligar: basta uma fonte dizer desligado; valor não
-// reconhecido também desliga, com aviso que cita a chave e não o valor. undefined se nenhuma fonte a define.
+// Chaves em que desligar é o lado inseguro (S28-b): valor não reconhecido as mantém ligadas.
+const DESLIGAR_E_INSEGURO = new Set(['MOISES_CONFERIR_PAINEL']);
+
+// Junta o ambiente e o coletor.env de uma chave de desligar: basta uma fonte dizer desligado. Valor não
+// reconhecido vale o lado seguro da chave (desligado; ligado para a conferência do painel), com aviso que
+// cita a chave e não o valor. undefined se nenhuma fonte a define.
 function chaveDeDesligar(nome, doAmbiente, doArquivo, avisar) {
   const valores = [doAmbiente, doArquivo].map(valorDaChave);
   if (valores.includes(null)) {
-    avisar(`[coletor] valor não reconhecido em ${nome} (aceito: 0, false, off, nao, não, desligado ou 1, true, on, sim, ligado); vale desligado.`);
+    const seguro = DESLIGAR_E_INSEGURO.has(nome) ? '1' : '0';
+    avisar(`[coletor] valor não reconhecido em ${nome} (aceito: 0, false, off, nao, não, desligado ou 1, true, on, sim, ligado); vale ${seguro === '1' ? 'ligado' : 'desligado'}.`);
+    if (seguro === '1') return valores.includes('0') ? '0' : '1';
     return '0';
   }
   if (valores.includes('0')) return '0';

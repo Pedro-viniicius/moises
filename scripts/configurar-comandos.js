@@ -15,7 +15,7 @@
 // Lê o coletor.env só para isso; não toca em coletor.env, vercel.env nem senha-painel.txt.
 import fs from 'node:fs';
 import path from 'node:path';
-import { impressaoDaPublica, pedidoDeAparelho, chavePublica } from '../collector/assinatura.js';
+import { impressaoDaPublica, pedidoDeAparelho, chavePublica, RE_KID } from '../collector/assinatura.js';
 import { caminhosDoColetor } from '../collector/index.js';
 
 const local = caminhosDoColetor({ avisar: (m) => console.error(`Aviso: ${m.replace(/^\[coletor\] /, '')}`) });
@@ -24,7 +24,6 @@ const arqChaves = local.chavesArq;
 const arqProjetos = local.projetosArq;
 const arqPedidos = path.join(pastaEstado, 'aparelhos-pedidos.json');
 const arqConferencia = path.join(pastaEstado, 'painel-conferencia.json');
-const RE_KID = /^[a-z0-9]{6}$/;
 const VALIDADE_PEDIDO_MS = 3_600_000; // a mesma do servidor
 const CONFERENCIA_VELHA_MS = 3_600_000; // o coletor confere a cada 10 min: mais de 1 hora é coletor parado
 const FOLGA_RELOGIO_MS = 5 * 60_000;
@@ -171,7 +170,7 @@ const semHifens = (impressao) => impressao.replaceAll('-', '');
 
 function autorizar(kid, impressaoDigitada) {
   mostrarArquivo();
-  if (typeof kid !== 'string' || !RE_KID.test(kid)) sair(`Informe o kid do aparelho (6 letras ou dígitos), como aparece em --pedidos.\n${USO}`);
+  if (typeof kid !== 'string' || !RE_KID.test(kid)) sair(`Informe o kid do aparelho (6 hexadecimais), como aparece em --pedidos.\n${USO}`);
   // A impressão digital é obrigatória: é ela que garante que a chave gravada é a que o aparelho mostra,
   // mesmo que o servidor troque o pedido (com o mesmo kid) entre --pedidos e --autorizar.
   const conferida = normalizarImpressao(impressaoDigitada);
@@ -244,7 +243,7 @@ function listar() {
 
 function revogar(kid) {
   mostrarArquivo();
-  if (typeof kid !== 'string' || !RE_KID.test(kid)) sair(`Informe o kid do aparelho (6 letras ou dígitos).\n${USO}`);
+  if (typeof kid !== 'string' || !RE_KID.test(kid)) sair(`Informe o kid do aparelho (6 hexadecimais).\n${USO}`);
   const chaves = lerChaves();
   if (!Object.hasOwn(chaves, kid)) sair(`Aparelho ${kid} não encontrado; nada foi alterado.`);
   delete chaves[kid];

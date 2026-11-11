@@ -71,7 +71,9 @@ test('S28: valor estranho desliga, com aviso que cita a chave e não o valor', (
     const { env, texto, conf } = ler([`MOISES_COMANDOS=${v}`, `MOISES_SUBIR_TEXTO=${v}`, `MOISES_CONFERIR_PAINEL=${v}`]);
     assert.equal(env.MOISES_COMANDOS, '0', v);
     assert.equal(env.MOISES_SUBIR_TEXTO, '0', v);
-    assert.equal(conf.conferirPainel, false, v);
+    // S28-b: para a conferência do painel, desligar é o lado inseguro: valor estranho a mantém ligada.
+    assert.equal(conf.conferirPainel, true, v);
+    assert.match(texto, /MOISES_CONFERIR_PAINEL/);
     assert.match(texto, /MOISES_COMANDOS/);
     assert.match(texto, /MOISES_SUBIR_TEXTO/);
     if (v.length > 2) assert.ok(!texto.includes(v), `o aviso não repete o valor: ${v}`);
@@ -361,4 +363,44 @@ test('S27: a CSP publicada tem worker-src none', () => {
   assert.ok(csp.includes("worker-src 'none'"), csp.join('; '));
   assert.ok(csp.includes("default-src 'self'"));
   assert.ok(csp.includes("require-trusted-types-for 'script'"));
+});
+
+// ---------------------------------------------------------------- ressalvas da verificação final
+
+test('S28-a: coletor.env com fim de linha CRLF (inteiro ou misturado) é lido igual', () => {
+  const d = novaPasta();
+  const arq = path.join(d, 'coletor.env');
+  fs.writeFileSync(arq, 'MOISES_URL=https://exemplo.test\r\nMOISES_COMANDOS=0\r\nMOISES_SUBIR_TEXTO=0   # já\r\nMOISES_ENCERRAR=0\n', { mode: 0o600 });
+  const avisos = [];
+  const env = { MOISES_CONF: arq };
+  const conf = configuracao({ env, home: path.join(d, 'home'), avisar: (m) => avisos.push(m) });
+  assert.equal(conf.url, 'https://exemplo.test');
+  assert.equal(env.MOISES_COMANDOS, '0');
+  assert.equal(env.MOISES_SUBIR_TEXTO, '0');
+  assert.equal(env.MOISES_ENCERRAR, '0');
+  assert.deepEqual(avisos, []);
+});
+
+test('S28-b: MOISES_CONFERIR_PAINEL só desliga com valor de desligar reconhecido', () => {
+  assert.equal(ler(['MOISES_CONFERIR_PAINEL=yes']).conf.conferirPainel, true);
+  assert.equal(ler([], { MOISES_CONFERIR_PAINEL: 'talvez' }).conf.conferirPainel, true);
+  assert.equal(ler(['MOISES_CONFERIR_PAINEL=0']).conf.conferirPainel, false);
+  assert.equal(ler(['MOISES_CONFERIR_PAINEL=desligado']).conf.conferirPainel, false);
+  assert.equal(ler(['MOISES_CONFERIR_PAINEL=talvez'], { MOISES_CONFERIR_PAINEL: '0' }).conf.conferirPainel, false, 'uma fonte que desliga de forma reconhecida vale');
+  const d = novaPasta();
+  const arq = path.join(d, 'coletor.env');
+  fs.writeFileSync(arq, 'MOISES_CONFERIR_PAINEL=yes\n', { mode: 0o600 });
+  assert.equal(caminhosDoColetor({ env: { MOISES_CONF: arq }, home: path.join(d, 'home'), avisar: () => {} }).conferirPainel, true);
+});
+
+test('R10: o script só aceita kid de 6 hexadecimais em --autorizar e --revogar', () => {
+  const d = novaPasta();
+  for (const args of [['--autorizar', 'zzzzzz', '0123-4567-89ab-cdef'], ['--revogar', 'zzzzzz']]) {
+    const r = spawnSync(process.execPath, [CONFIGURAR, ...args], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, HOME: path.join(d, 'home'), MOISES_PASTA_CONF: path.join(d, 'conf'), MOISES_CONFERIR_PAINEL: '0' },
+    });
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.stderr + r.stdout, /6 hexadecimais/, args.join(' '));
+  }
 });
