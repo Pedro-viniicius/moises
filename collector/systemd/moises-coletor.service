@@ -1,0 +1,15 @@
+[Unit]
+Description=Coletor do painel moises (sessões do Claude Code)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documentos/saas/moises
+ExecStart=/usr/bin/env node collector/index.js
+Environment=PATH=%h/.nvm/versions/node/v22.23.0/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=default.target

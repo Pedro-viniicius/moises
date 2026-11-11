@@ -1,0 +1,13 @@
+{
+  "name": "moises",
+  "private": true,
+  "type": "module",
+  "description": "Painel pessoal das sessões do Claude Code: coletor local + site na Vercel",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "coletor": "node collector/index.js",
+    "retrato": "MOISES_IDEIAS_TETO_DIA=0 node collector/index.js --uma-vez",
+    "configurar": "node scripts/configurar.js"
+  }
+}

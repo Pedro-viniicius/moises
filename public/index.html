@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Moisés · Sessões do Claude Code</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="coluna">
+    <header class="topo">
+      <h1>Moisés</h1>
+      <button class="btn btn-leve" id="sair" type="button">Sair</button>
+    </header>
+
+    <div class="abas" role="tablist" aria-label="Seções">
+      <button class="aba" id="aba-sessoes" role="tab" type="button" aria-selected="true" aria-controls="painel-sessoes">Sessões</button>
+      <button class="aba" id="aba-historico" role="tab" type="button" aria-selected="false" aria-controls="painel-historico" tabindex="-1">Histórico</button>
+    </div>
+
+    <div id="banner-rede" class="banner" role="status" hidden>Sem conexão, tentando de novo…</div>
+
+    <section id="painel-sessoes" role="tabpanel" aria-labelledby="aba-sessoes">
+      <div class="resumo" id="resumo" hidden>
+        <div class="resumo-rotulo">Total de hoje</div>
+        <div class="resumo-total" id="resumo-total">—</div>
+        <div class="resumo-linha">
+          <span id="resumo-top" hidden></span>
+          <span id="resumo-ideias" class="num" hidden></span>
+        </div>
+        <div class="coletor" id="coletor" role="status"></div>
+      </div>
+
+      <div class="filtro" role="group" aria-label="Filtro de sessões">
+        <button type="button" id="filtro-abertas" aria-pressed="true">Abertas</button>
+        <button type="button" id="filtro-todas" aria-pressed="false">Todas de hoje</button>
+      </div>
+
+      <p class="mensagem-vazia" id="carregando">Carregando…</p>
+      <p class="mensagem-vazia" id="vazio" hidden>Nenhuma sessão aberta agora</p>
+      <ul class="lista" id="lista"></ul>
+    </section>
+
+    <section id="painel-historico" role="tabpanel" aria-labelledby="aba-historico" hidden>
+      <div class="busca">
+        <label for="busca" class="resumo-rotulo">Buscar por nome, projeto ou resumo</label>
+        <input class="campo" id="busca" type="search" autocomplete="off">
+      </div>
+      <p class="mensagem-vazia" id="logs-carregando" hidden>Carregando…</p>
+      <p class="mensagem-vazia" id="logs-vazio" hidden>Nenhuma sessão encerrada pelo painel ainda.</p>
+      <p class="mensagem-vazia" id="logs-erro" role="alert" hidden>Não foi possível carregar o histórico.</p>
+      <ul class="lista" id="logs"></ul>
+    </section>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
