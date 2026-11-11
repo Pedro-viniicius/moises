@@ -19,7 +19,11 @@ process.env.PANEL_PASSWORD_HASH = gerarHashSenha(SENHA);
 process.env.SESSION_SECRET = 'x'.repeat(48);
 process.env.MOISES_TOKEN = 'y'.repeat(43);
 
-beforeEach(() => redisFalso.limpar());
+// Rodada 2 (A4, S22): o servidor só aceita comando de aparelho anunciado no retrato e só entrega a coletor com protocolo 2.
+beforeEach(() => {
+  redisFalso.limpar();
+  redisFalso.db.set('moises:retrato', JSON.stringify({ sessoes: [], orquestracao: { aparelhos: [{ kid: 'ab2cd3', rotulo: 'x' }] } }));
+});
 
 async function chamar(handler, { method = 'GET', url = '/', body, bruto, headers = {} } = {}) {
   const txt = bruto ?? (body === undefined ? '' : JSON.stringify(body));
@@ -49,7 +53,7 @@ const cmdValido = (extra = {}) => ({
 });
 const guardado = (id) => JSON.parse(redisFalso.db.get('moises:cmds').get(id));
 const enviar = async (cookie, c) => (await chamar(comando, { method: 'POST', body: c, headers: { cookie } })).statusCode;
-const acks = (lista) => chamar(ingest, { method: 'POST', body: { acks: lista }, headers: coletor });
+const acks = (lista) => chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: lista }, headers: coletor });
 const porId = async (cookie) => Object.fromEntries((await chamar(estado, { headers: { cookie } })).body.comandos.map((c) => [c.id, c]));
 
 // ---------------------------------------------------------------- CA4
@@ -66,7 +70,7 @@ test('CA4: qualquer ack (recebido, feito, falhou, recusado, formato antigo) apag
   ];
   const cmds = grupos.map(() => cmdValido());
   for (const c of cmds) assert.equal(await enviar(cookie, c), 200);
-  const entregues = (await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos;
+  const entregues = (await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.comandos;
   assert.equal(entregues.length, grupos.length);
   for (const e of entregues) {
     assert.equal(e.assinatura, ASSINATURA);
@@ -83,7 +87,7 @@ test('CA4: qualquer ack (recebido, feito, falhou, recusado, formato antigo) apag
   });
   const corpo = JSON.stringify([(await chamar(estado, { headers: { cookie } })).body, (await chamar(logs, { headers: { cookie } })).body]);
   assert.ok(!corpo.includes(MARCA) && !corpo.includes(ASSINATURA));
-  assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos.length, 0, 'nada é entregue de novo');
+  assert.equal((await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.comandos.length, 0, 'nada é entregue de novo');
 });
 
 test('CA4: o POST /api/comando nunca devolve dados nem assinatura, nem em erro', async () => {
@@ -109,7 +113,7 @@ test('CA9: estado do comando só anda para a frente, mesmo com acks fora de orde
   const b = cmdValido();
   await enviar(cookie, a);
   await enviar(cookie, b);
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   await acks([{ id: a.id, estado: 'feito' }, { id: a.id, estado: 'recebido' }, { id: a.id, estado: 'falhou', erro: 'tarde demais' }, { id: a.id, estado: 'recusado', motivo: 'repetido' }]);
   assert.equal((await porId(cookie))[a.id].estado, 'feito');
   assert.equal((await porId(cookie))[a.id].erro, null);
@@ -126,7 +130,7 @@ test('CA9: um id de comando já concluído não pode ser enviado de novo (409), 
   const cookie = await entrar();
   const c = cmdValido();
   await enviar(cookie, c);
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   await acks([{ id: c.id, estado: 'feito' }]);
   assert.equal(await enviar(cookie, c), 409);
   assert.equal(await enviar(cookie, { ...c, dados: JSON.stringify({ texto: 'outro', visto: { projeto: 'p', nome: null } }) }), 409);
@@ -141,7 +145,7 @@ test('o log do Histórico só nasce de encerrar que terminou feito', async () =>
   const recusadoEncerrar = cmdValido({ tipo: 'encerrar', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
   const feitoEncerrar = cmdValido({ tipo: 'encerrar', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
   for (const c of [feitoMensagem, falhouEncerrar, recusadoEncerrar, feitoEncerrar]) await enviar(cookie, c);
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   await acks([
     { id: feitoMensagem.id, estado: 'feito', log },
     { id: falhouEncerrar.id, estado: 'falhou', erro: 'x', log },
@@ -177,7 +181,7 @@ test('duas confirmações do mesmo comando na mesma chamada terminam no estado m
   const cookie = await entrar();
   const c = cmdValido({ tipo: 'encerrar', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
   await enviar(cookie, c);
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   // O coletor manda recebido e feito juntos quando o comando termina antes do próximo ciclo.
   await acks([{ id: c.id, estado: 'recebido' }, { id: c.id, estado: 'feito', log: { nome: 'junto' } }]);
   assert.equal((await porId(cookie))[c.id].estado, 'feito');

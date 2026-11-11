@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { lerProjetos, proximoIntervalo, tratarComandos, rodar } from '../collector/index.js';
+import { lerProjetos, proximoIntervalo, contarOcupadas, tratarComandos, conferirPainelPublicado, rodar } from '../collector/index.js';
 import { Auditoria } from '../collector/auditoria.js';
 import { Chaveiro, Porteiro } from '../collector/comandos.js';
 import { MODELOS, ESFORCOS, MODOS } from '../collector/orquestrador.js';
@@ -24,6 +24,9 @@ const RAIZ = fileURLToPath(new URL('..', import.meta.url));
 const INDEX = path.join(RAIZ, 'collector/index.js');
 const CONFIGURAR = path.join(RAIZ, 'scripts/configurar-comandos.js');
 const FALSO = fileURLToPath(new URL('./fixtures/claude-falso.js', import.meta.url));
+const PUBLICA = path.join(RAIZ, 'public');
+const ARQUIVOS_PAINEL = ['index.html', 'app.js', 'assinatura.js', 'cofre.js', 'style.css'];
+const PAINEL_ALTERADO = 'O painel publicado é diferente do código deste computador; comandos desligados.';
 const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-laco-'));
 // O encerrar antigo grava os limites onde a variável manda (lida no primeiro uso, não na importação).
 process.env.MOISES_LIMITES_ARQ = path.join(BASE, 'limites-encerrar.json');
@@ -80,7 +83,8 @@ function canal() {
       v: 1, kid: ap.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(),
       dados: JSON.stringify({ texto: SEGREDO, visto: { projeto: 'p', nome: null } }), ...campos,
     });
-  return { d, ap, porteiro, comando, linhas: () => lerLinhas(audArq) };
+  // Aceito, feito e falhou em auditoria.jsonl; recusas em auditoria-recusas.jsonl (S21).
+  return { d, ap, porteiro, comando, linhas: () => lerLinhas(audArq), recusas: () => lerLinhas(path.join(estado, 'auditoria-recusas.jsonl')) };
 }
 
 // Orquestrador espião: registra as chamadas e responde com `impl`.
@@ -124,22 +128,43 @@ test('lerProjetos ignora nome ou caminho inválido e arquivo ausente', () => {
   assert.deepEqual(Object.entries(lerProjetos(d)), [], 'pasta no lugar do arquivo');
 });
 
-test('proximoIntervalo: rápido com o painel aberto, sessão comandada aberta ou ack na fila; senão lento', () => {
+test('proximoIntervalo: rápido com o painel aberto, sessão comandada trabalhando ou esperando permissão, ou ack na fila; senão lento', () => {
   const agora = 1_794_387_000_000;
-  const base = { painelVistoEm: null, abertas: 0, acksPendentes: 0, agora, lento: 20_000, rapido: 3_000 };
+  const base = { painelVistoEm: null, ocupadas: 0, acksPendentes: 0, agora, lento: 20_000, rapido: 3_000 };
   // 1. nada acontecendo
   assert.equal(proximoIntervalo(base), 20_000);
   assert.equal(proximoIntervalo({ ...base, painelVistoEm: agora - 60_000 }), 20_000, 'painel visto há 60 s já não conta');
   // 2. painel visto há menos de 60 s
   assert.equal(proximoIntervalo({ ...base, painelVistoEm: agora - 59_000 }), 3_000);
   assert.equal(proximoIntervalo({ ...base, painelVistoEm: agora }), 3_000);
-  // 3. sessão comandada aberta
-  assert.equal(proximoIntervalo({ ...base, abertas: 1 }), 3_000);
+  // 3. sessão comandada trabalhando ou esperando permissão
+  assert.equal(proximoIntervalo({ ...base, ocupadas: 1 }), 3_000);
+  // Sessão comandada só aberta (esperando mensagem) já não acelera (A4).
+  assert.equal(proximoIntervalo({ ...base, abertas: 1 }), 20_000);
   // 4. ack na fila
   assert.equal(proximoIntervalo({ ...base, acksPendentes: 2 }), 3_000);
   // Valor de painelVistoEm que não é número, ou muito no futuro (vem do servidor), não acelera.
   assert.equal(proximoIntervalo({ ...base, painelVistoEm: 'agora' }), 20_000);
   assert.equal(proximoIntervalo({ ...base, painelVistoEm: agora + 10 * 60_000 }), 20_000);
+});
+
+test('contarOcupadas conta só sessões comandadas trabalhando ou esperando permissão', () => {
+  const s = (gerenciada, estado) => ({ chave: SESSAO, gerenciada, estado });
+  const retrato = {
+    sessoes: [
+      s(true, 'trabalhando'),
+      s(true, 'esperando_permissao'),
+      s(true, 'esperando_mensagem'),
+      s(true, 'encerrada'),
+      s(false, 'trabalhando'),
+      s(undefined, 'esperando_permissao'),
+      null,
+    ],
+  };
+  assert.equal(contarOcupadas(retrato), 2);
+  assert.equal(contarOcupadas({ sessoes: [] }), 0);
+  assert.equal(contarOcupadas({}), 0);
+  assert.equal(contarOcupadas(null), 0);
 });
 
 // ---------------------------------------------------------------- tratarComandos
@@ -158,7 +183,8 @@ test('tratarComandos recusa sem credencial e não executa', async () => {
     { id: semAssinatura.id, estado: 'recusado', erro: 'Comando sem assinatura.', motivo: 'sem_credencial' },
     { id: trocada.id, estado: 'recusado', erro: 'A assinatura do comando não confere com o código deste aparelho.', motivo: 'assinatura' },
   ]);
-  assert.deepEqual(m.linhas().map((l) => [l.id, l.decisao, l.motivo]), [
+  assert.deepEqual(m.linhas(), [], 'recusa não vai para o arquivo dos aceitos');
+  assert.deepEqual(m.recusas().map((l) => [l.id, l.decisao, l.motivo]), [
     [semAssinatura.id, 'recusado', 'sem_credencial'],
     [trocada.id, 'recusado', 'assinatura'],
   ]);
@@ -186,6 +212,13 @@ test('tratarComandos confirma o recebimento antes do resultado e depois o result
   const acks = [];
   let acordou = 0;
   const logs = [];
+  // O que o laço passa ao porteiro ao concluir (R3: a chave da sessão criada vai junto).
+  const concluidos = [];
+  const concluirReal = m.porteiro.concluir.bind(m.porteiro);
+  m.porteiro.concluir = (c, fim) => {
+    concluidos.push([c.id, fim]);
+    return concluirReal(c, fim);
+  };
   const ok = { ...m.comando(), idadeMs: 1234 };
   const ruim = m.comando({ tipo: 'interromper', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
   const execucoes = await tratarComandos({ comandos: [ok, ruim], porteiro: m.porteiro, orquestrador: orq, acks, aoTerminar: () => acordou++, log: (...a) => logs.push(a.join(' ')) });
@@ -213,6 +246,10 @@ test('tratarComandos confirma o recebimento antes do resultado e depois o result
   assert.equal(acordou, 2);
   assert.deepEqual(acks[3], { id: ok.id, estado: 'feito', erro: null, log, chaveNova: 'principal:0f0e0d0c-0b0a-4908-8706-050403020100' });
   assert.equal(acks.length, 4);
+  assert.deepEqual(concluidos, [
+    [ruim.id, { ok: false, erro: 'Esta sessão não foi aberta pelo Moisés; só é possível ver e encerrar.', chaveNova: null }],
+    [ok.id, { ok: true, erro: null, chaveNova: 'principal:0f0e0d0c-0b0a-4908-8706-050403020100' }],
+  ]);
 
   // Auditoria: aceito e depois feito ou falhou, via porteiro.concluir; sem o texto da mensagem.
   const linhas = m.linhas();
@@ -251,6 +288,45 @@ test('comando sem tipo é recusado e não vira encerrar', async () => {
   // O laço não executa mais nada fora do porteiro: o encerrar antigo saiu do coletor.
   const fonte = fs.readFileSync(INDEX, 'utf8');
   assert.ok(!fonte.includes('executarEncerrar'));
+});
+
+test('tratarComandos trata no máximo 20 comandos por resposta', async () => {
+  const m = canal();
+  const orq = espiao();
+  const acks = [];
+  const cmds = Array.from({ length: 25 }, () => m.comando());
+  const execucoes = await tratarComandos({ comandos: cmds, porteiro: m.porteiro, orquestrador: orq, acks, log: () => {} });
+  await Promise.all(execucoes);
+  assert.equal(orq.chamadas.length, 20);
+  const ids = new Set(acks.map((a) => a.id));
+  assert.deepEqual([...ids], cmds.slice(0, 20).map((c) => c.id), 'os 5 últimos ficam sem ack (o servidor entrega de novo)');
+  // Lixo também conta no teto: 20 itens sem id ocupam a vez dos comandos depois deles.
+  acks.length = 0;
+  await tratarComandos({ comandos: [...Array(20).fill(null), m.comando()], porteiro: m.porteiro, orquestrador: orq, acks, log: () => {} });
+  assert.deepEqual(acks, []);
+});
+
+test('tratarComandos com o painel alterado recusa tudo antes do porteiro (porteiro sem desligar)', async () => {
+  const m = canal();
+  const orq = espiao();
+  const acks = [];
+  const logs = [];
+  let conferidos = 0;
+  // Porteiro sem desligar/religar: o laço é quem recusa.
+  const porteiro = { conferir: (c) => (conferidos++, m.porteiro.conferir(c)), concluir: (c, f) => m.porteiro.concluir(c, f), ativo: () => m.porteiro.ativo() };
+  const bloqueio = { motivo: 'painel_alterado', erro: PAINEL_ALTERADO };
+  const cmds = [m.comando(), m.comando({ tipo: 'interromper', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) })];
+  const execucoes = await tratarComandos({ comandos: [...cmds, { id: 7 }], porteiro, orquestrador: orq, acks, bloqueio, log: (...a) => logs.push(a.join(' ')) });
+  assert.deepEqual(execucoes, []);
+  assert.equal(orq.chamadas.length, 0);
+  assert.equal(conferidos, 0);
+  assert.deepEqual(acks, cmds.map((c) => ({ id: c.id, estado: 'recusado', erro: PAINEL_ALTERADO, motivo: 'painel_alterado' })));
+  assert.ok(logs.every((l) => l.includes('painel_alterado')));
+  assert.equal(logs.length, 2);
+  // Sem bloqueio, o mesmo porteiro aceita um comando novo.
+  acks.length = 0;
+  await Promise.all(await tratarComandos({ comandos: [m.comando()], porteiro, orquestrador: orq, acks, log: () => {} }));
+  assert.equal(acks[0].estado, 'recebido');
 });
 
 test('exceção na execução vira falhou com erro genérico', async (t) => {
@@ -423,12 +499,28 @@ test('--revogar tira o aparelho', () => {
 
 // ---------------------------------------------------------------- rodar e main
 
-// Painel falso: guarda cada corpo recebido e entrega os comandos da fila.
-async function painelFalso(t, token, { sempre = () => [] } = {}) {
+// Painel falso: guarda cada corpo recebido e entrega os comandos da fila. Serve os arquivos do painel
+// de `publica` (por padrão, o public/ do repositório); `trocados` muda o que é servido (null: 404).
+// POST cujo corpo satisfaz `estado.segurar` fica sem resposta e o corpo vai para `segurados`.
+async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA } = {}) {
   const pedidos = [];
   const fila = [];
+  const gets = [];
+  const segurados = [];
+  const trocados = new Map();
   let negados = 0;
+  const estado = { segurar: null };
   const servidor = http.createServer((req, res) => {
+    if (req.method === 'GET') {
+      const nome = req.url.slice(1);
+      gets.push(nome);
+      if (req.headers.authorization) negados++; // o token nunca vai junto
+      if (!ARQUIVOS_PAINEL.includes(nome)) return res.writeHead(404).end();
+      const conteudo = trocados.has(nome) ? trocados.get(nome) : fs.readFileSync(path.join(publica, nome));
+      if (conteudo === null) return res.writeHead(404).end();
+      if (typeof conteudo === 'function') return conteudo(res);
+      return res.writeHead(200).end(conteudo);
+    }
     let corpo = '';
     req.setEncoding('utf8');
     req.on('data', (p) => (corpo += p));
@@ -436,6 +528,10 @@ async function painelFalso(t, token, { sempre = () => [] } = {}) {
       if (req.method !== 'POST' || req.url !== '/api/ingest' || req.headers.authorization !== `Bearer ${token}`) {
         negados++;
         res.writeHead(401).end('{}');
+        return;
+      }
+      if (estado.segurar?.(JSON.parse(corpo))) {
+        segurados.push(JSON.parse(corpo));
         return;
       }
       pedidos.push(JSON.parse(corpo));
@@ -449,7 +545,15 @@ async function painelFalso(t, token, { sempre = () => [] } = {}) {
   });
   const acks = () => pedidos.flatMap((p) => p.acks || []);
   const retratos = () => pedidos.map((p) => p.retrato).filter(Boolean);
-  return { url: `http://127.0.0.1:${servidor.address().port}`, pedidos, fila, acks, retratos, negados: () => negados };
+  return { url: `http://127.0.0.1:${servidor.address().port}`, pedidos, fila, gets, segurados, trocados, estado, acks, retratos, negados: () => negados };
+}
+
+// Cópia dos arquivos do painel numa pasta do caso (o public/ do repositório pode mudar durante o teste).
+function copiaPublica() {
+  const d = path.join(novaPasta(), 'public');
+  fs.mkdirSync(d);
+  for (const nome of ARQUIVOS_PAINEL) fs.copyFileSync(path.join(PUBLICA, nome), path.join(d, nome));
+  return d;
 }
 
 // Conta principal vazia, um projeto e um aparelho autorizado.
@@ -507,6 +611,10 @@ test('rodar com um servidor local falso: manda o retrato com orquestracao e trat
     aparelhos: [{ kid: 'ab2cd3', rotulo: 'celular' }],
   });
   assert.equal(painel.negados(), 0);
+  // Antes do primeiro envio, o laço conferiu os cinco arquivos do painel (S15), sem mandar o token.
+  assert.deepEqual([...painel.gets].sort(), [...ARQUIVOS_PAINEL].sort());
+  // Todo corpo anuncia o protocolo novo (S22).
+  assert.equal(painel.pedidos[0].protocolo, 2);
 
   // Um abrir assinado e um comando sem assinatura chegam juntos.
   const abrir = assinar(amb.ap.chave, {
@@ -533,10 +641,12 @@ test('rodar com um servidor local falso: manda o retrato com orquestracao e trat
   const sessionId = feito.chaveNova.split(':')[1];
   assert.equal(processosCom(sessionId).length, 1, 'o claude falso da sessão está vivo');
 
-  // Auditoria local: aceito e feito do abrir, recusa do sem assinatura.
+  // Auditoria local: aceito e feito do abrir (com a sessão criada, R3); recusa do sem assinatura no arquivo das recusas.
   const linhas = lerLinhas(path.join(amb.pastaEstado, 'auditoria.jsonl'));
   assert.deepEqual(linhas.filter((l) => l.id === abrir.id).map((l) => l.decisao), ['aceito', 'feito']);
-  assert.deepEqual(linhas.filter((l) => l.id === semAssinatura.id).map((l) => [l.decisao, l.motivo]), [['recusado', 'sem_credencial']]);
+  assert.equal(linhas.find((l) => l.id === abrir.id && l.decisao === 'feito').sessao, feito.chaveNova);
+  const recusas = lerLinhas(path.join(amb.pastaEstado, 'auditoria-recusas.jsonl'));
+  assert.deepEqual(recusas.filter((l) => l.id === semAssinatura.id).map((l) => [l.decisao, l.motivo]), [['recusado', 'sem_credencial']]);
 
   // parar() encerra o laço e os filhos, e só resolve depois.
   await coletor.parar();
@@ -546,8 +656,11 @@ test('rodar com um servidor local falso: manda o retrato com orquestracao e trat
   await espera(300);
   assert.equal(painel.pedidos.length, n, 'o laço parou de chamar o painel');
   // Nada de texto de sessão nos logs, no que foi para o painel em acks nem na auditoria.
-  const tudo = logs.join('\n') + JSON.stringify(painel.acks()) + fs.readFileSync(path.join(amb.pastaEstado, 'auditoria.jsonl'), 'utf8');
+  const tudo = logs.join('\n') + JSON.stringify(painel.acks()) + JSON.stringify(linhas) + JSON.stringify(recusas);
   assert.ok(!tudo.includes('TEXTO-SECRETO'));
+  assert.ok(painel.pedidos.every((p) => p.protocolo === 2));
+  // Ao iniciar, o log diz como estão as chaves de desligar (S17).
+  assert.ok(logs.some((l) => /comandos: ligados; texto: sobe/.test(l)), logs.join('\n'));
 });
 
 test('rodar com soPrefixo: o retrato só leva sessões cujo nome começa pelo prefixo', async (t) => {
@@ -592,10 +705,172 @@ test('rodar: um painel que devolve comandos em toda resposta não faz o laço gi
   const n0 = painel.pedidos.length;
   await espera(1000);
   const porSegundo = painel.pedidos.length - n0;
-  assert.ok(porSegundo >= 3 && porSegundo <= 6, `ciclos em 1 s: ${porSegundo}`);
+  // Só o teto importa (o piso de 200 ms dá no máximo 5 ciclos por segundo); máquina lenta faz menos (R5).
+  assert.ok(porSegundo >= 1 && porSegundo <= 6, `ciclos em 1 s: ${porSegundo}`);
   // Cada comando lixo foi recusado e confirmado, nenhum executado.
   assert.ok(painel.acks().length >= porSegundo);
   assert.ok(painel.acks().every((a) => a.estado === 'recusado' && a.motivo === 'sem_credencial'));
+});
+
+// Coletor em processo contra o painel falso; parar() fica para o fim do teste.
+async function iniciarColetor(t, amb, painel, extra = {}) {
+  const logs = [];
+  const coletor = await rodar({
+    url: painel.url, token: amb.token, pastaEstado: amb.pastaEstado, chavesArq: amb.chavesArq, projetosArq: amb.projetosArq,
+    dirs: [amb.dirClaude], intervaloMs: 200, intervaloRapidoMs: 50, claudeBin: FALSO, ideiasTetoDia: 0,
+    log: (...a) => logs.push(a.map(String).join(' ')),
+    ...extra,
+  });
+  let parado = false;
+  const parar = async () => {
+    if (!parado) {
+      parado = true;
+      await coletor.parar();
+    }
+  };
+  t.after(parar);
+  return { parar, logs };
+}
+
+test('conferirPainelPublicado compara o SHA-256 dos cinco arquivos servidos com os locais', async (t) => {
+  const publica = copiaPublica();
+  const painel = await painelFalso(t, 'x', { publica });
+  const conferir = () => conferirPainelPublicado({ url: painel.url, pastaPublica: publica, sinal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(await conferir(), { ok: true });
+  assert.deepEqual([...painel.gets].sort(), [...ARQUIVOS_PAINEL].sort());
+  assert.equal(painel.negados(), 0, 'sem token nos GET');
+
+  // Um byte a mais no app.js servido.
+  painel.trocados.set('app.js', Buffer.concat([fs.readFileSync(path.join(publica, 'app.js')), Buffer.from(' ')]));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'app.js', causa: 'diferente' });
+  painel.trocados.clear();
+  // Arquivo que não baixa (404), redirecionamento e resposta grande demais contam como falha.
+  painel.trocados.set('cofre.js', null);
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'cofre.js', causa: 'download' });
+  painel.trocados.clear();
+  painel.trocados.set('style.css', (res) => res.writeHead(302, { location: '/index.html' }).end());
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'style.css', causa: 'download' });
+  painel.trocados.clear();
+  painel.trocados.set('index.html', Buffer.alloc(6_000_000, 0x20));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'index.html', causa: 'download' });
+  painel.trocados.clear();
+  // Arquivo local que falta também desliga (não há com o que comparar).
+  fs.rmSync(path.join(publica, 'assinatura.js'));
+  assert.deepEqual(await conferir(), { ok: false, arquivo: 'assinatura.js', causa: 'local' });
+  // Painel fora do ar.
+  const fechado = await conferirPainelPublicado({ url: 'http://127.0.0.1:9', pastaPublica: PUBLICA, sinal: AbortSignal.timeout(10_000) });
+  assert.deepEqual([fechado.ok, fechado.arquivo, fechado.causa], [false, 'index.html', 'download']);
+});
+
+test('rodar com o painel publicado diferente de public/: comandos recusados com painel_alterado até a conferência bater', async (t) => {
+  const amb = ambiente();
+  const publica = copiaPublica();
+  const painel = await painelFalso(t, amb.token, { publica });
+  painel.trocados.set('app.js', Buffer.from('/* painel trocado */'));
+  const { logs } = await iniciarColetor(t, amb, painel, { pastaPublica: publica, conferirPainelMs: 300 });
+
+  const primeiro = await ate(() => painel.retratos()[0], 'primeiro retrato');
+  assert.deepEqual([primeiro.orquestracao.ativa, primeiro.orquestracao.motivo], [false, 'painel_alterado']);
+  const visto = JSON.stringify({ visto: { projeto: 'p', nome: null } });
+  const cmd1 = assinar(amb.ap.chave, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
+  painel.fila.push({ ...cmd1, idadeMs: 5 });
+  const recusa = await ate(() => painel.acks().find((a) => a.id === cmd1.id), 'recusa do comando');
+  assert.deepEqual(recusa, { id: cmd1.id, estado: 'recusado', erro: PAINEL_ALTERADO, motivo: 'painel_alterado' });
+  assert.ok(logs.some((l) => /painel publicado.*app\.js/.test(l)), logs.join('\n'));
+  assert.ok(!logs.join('\n').includes('painel trocado'), 'o log não cita o conteúdo servido');
+
+  // O painel volta a ser o mesmo: na próxima conferência os comandos religam.
+  painel.trocados.clear();
+  await ate(() => painel.retratos().at(-1)?.orquestracao.ativa === true, 'orquestração religada');
+  const cmd2 = assinar(amb.ap.chave, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
+  painel.fila.push({ ...cmd2, idadeMs: 5 });
+  const recebido = await ate(() => painel.acks().find((a) => a.id === cmd2.id), 'ack do comando');
+  assert.equal(recebido.estado, 'recebido');
+  assert.ok(logs.some((l) => /painel publicado confere/.test(l)), logs.join('\n'));
+});
+
+test('rodar com o painel fora do ar desliga os comandos; com conferirPainel: false não confere', async (t) => {
+  const amb = ambiente();
+  const painel = await painelFalso(t, amb.token);
+  painel.trocados.set('index.html', null);
+  await iniciarColetor(t, amb, painel);
+  const r = await ate(() => painel.retratos()[0], 'primeiro retrato');
+  assert.deepEqual([r.orquestracao.ativa, r.orquestracao.motivo], [false, 'painel_alterado']);
+
+  const amb2 = ambiente();
+  const painel2 = await painelFalso(t, amb2.token);
+  painel2.trocados.set('index.html', null);
+  await iniciarColetor(t, amb2, painel2, { conferirPainel: false });
+  const r2 = await ate(() => painel2.retratos()[0], 'primeiro retrato sem conferência');
+  assert.deepEqual([r2.orquestracao.ativa, r2.orquestracao.motivo], [true, null]);
+  assert.deepEqual(painel2.gets, []);
+});
+
+test('rodar: sessão não comandada sobe sem última resposta e sem tarefa vinda do pedido', async (t) => {
+  const amb = ambiente();
+  const pastaProj = path.join(amb.dirClaude, 'projects', '-tmp-projeto-x');
+  const agora = Date.now();
+  const sessoes = { '33333333-3333-4333-8333-333333333333': 'sessao-manual', '44444444-4444-4444-8444-444444444444': null };
+  for (const [id, titulo] of Object.entries(sessoes)) {
+    fs.mkdirSync(path.join(pastaProj, id), { recursive: true });
+    const linhas = [
+      { type: 'user', timestamp: new Date(agora - 2000).toISOString(), cwd: amb.proj, message: { role: 'user', content: `PEDIDO-SECRETO-MANUAL faça a coisa ${id.slice(0, 4)}` } },
+      {
+        type: 'assistant', timestamp: new Date(agora - 1000).toISOString(), cwd: amb.proj, requestId: `req_${id}`,
+        message: { id: `msg_${id}`, model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'RESPOSTA-SECRETA-MANUAL feito' }], usage: { input_tokens: 1, output_tokens: 1 } },
+      },
+    ];
+    fs.writeFileSync(path.join(pastaProj, `${id}.jsonl`), linhas.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    if (titulo) fs.writeFileSync(path.join(pastaProj, id, 'custom-title.json'), JSON.stringify({ customTitle: titulo }));
+  }
+  const painel = await painelFalso(t, amb.token);
+  await iniciarColetor(t, amb, painel);
+  const r = await ate(() => (painel.retratos()[0]?.sessoes.length === 2 ? painel.retratos()[0] : null), 'retrato com as duas sessões');
+  const porId = Object.fromEntries(r.sessoes.map((s) => [s.sessionId, s]));
+  const [comNome, semNome] = Object.keys(sessoes).map((id) => porId[id]);
+  assert.deepEqual(
+    [comNome.ultimaResposta, comNome.ultimaRespostaEm, comNome.tarefa, comNome.tarefaOrigem, comNome.nome],
+    [null, null, 'sessao-manual', 'nome', 'sessao-manual'],
+  );
+  assert.deepEqual([semNome.ultimaResposta, semNome.ultimaRespostaEm, semNome.tarefa, semNome.tarefaOrigem], [null, null, null, null]);
+  const tudo = JSON.stringify(painel.pedidos);
+  assert.ok(!tudo.includes('PEDIDO-SECRETO'), 'o pedido de sessão aberta à mão não sai da máquina');
+  assert.ok(!tudo.includes('RESPOSTA-SECRETA'), 'a resposta de sessão aberta à mão não sai da máquina');
+});
+
+test('parar() manda as confirmações que ficaram na fila, com tempo limite', async (t) => {
+  const amb = ambiente();
+  const painel = await painelFalso(t, amb.token);
+  const { parar } = await iniciarColetor(t, amb, painel, { envioFinalMs: 400 });
+  await ate(() => painel.retratos()[0], 'primeiro retrato');
+  // Um comando lixo: o ack de recusa sai no envio seguinte, que o painel segura sem responder.
+  const lixo = { id: novoId(), tipo: 'encerrar', chave: SESSAO };
+  painel.estado.segurar = (c) => c.acks?.some((a) => a.id === lixo.id);
+  painel.fila.push(lixo);
+  await ate(() => painel.segurados.length > 0, 'envio com o ack segurado');
+  painel.estado.segurar = null;
+  const n = painel.pedidos.length;
+  await parar();
+  const finais = painel.pedidos.slice(n);
+  assert.equal(finais.length, 1, 'um último envio');
+  assert.equal(finais[0].retrato, null, 'só as confirmações');
+  assert.equal(finais[0].protocolo, 2);
+  assert.deepEqual(finais[0].acks.map((a) => [a.id, a.estado, a.motivo]), [[lixo.id, 'recusado', 'sem_credencial']]);
+
+  // Painel que não responde: parar() desiste no tempo limite e resolve.
+  const amb2 = ambiente();
+  const painel2 = await painelFalso(t, amb2.token);
+  const c2 = await iniciarColetor(t, amb2, painel2, { envioFinalMs: 400 });
+  await ate(() => painel2.retratos()[0], 'primeiro retrato do segundo');
+  const lixo2 = { id: novoId(), tipo: 'encerrar', chave: SESSAO };
+  painel2.estado.segurar = (c) => c.acks?.some((a) => a.id === lixo2.id);
+  painel2.fila.push(lixo2);
+  await ate(() => painel2.segurados.length > 0, 'envio segurado do segundo');
+  const inicio = Date.now();
+  await c2.parar();
+  const levou = Date.now() - inicio;
+  assert.ok(levou >= 350 && levou < 3000, `parar levou ${levou} ms`);
+  assert.equal(painel2.segurados.length, 2, 'tentou o último envio uma vez');
 });
 
 test('rodar recusa URL sem https ou sem token', async () => {
@@ -669,4 +944,65 @@ test('main lê a configuração do ambiente, manda o retrato e sai limpo com SIG
   assert.ok(!saida.includes(amb.token));
   filho.kill('SIGTERM');
   assert.deepEqual(await fim, { codigo: 0, sinal: null });
+});
+
+// Processo do coletor com um coletor.env do caso (MOISES_CONF) e o claude falso como `claude` no PATH.
+function processoComConf(t, amb, linhasConf, extraEnv = {}) {
+  const conf = path.join(amb.d, 'coletor.env');
+  fs.writeFileSync(conf, `${linhasConf.join('\n')}\n`, { mode: 0o600 });
+  const bin = path.join(amb.d, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.symlinkSync(FALSO, path.join(bin, 'claude'));
+  const env = ambienteDoProcesso(amb, { MOISES_CONF: conf, PATH: `${bin}${path.delimiter}${process.env.PATH}`, ...extraEnv });
+  const filho = spawn(process.execPath, [INDEX], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const saida = { texto: '' };
+  filho.stdout.on('data', (d) => (saida.texto += d));
+  filho.stderr.on('data', (d) => (saida.texto += d));
+  const fim = new Promise((r) => filho.on('exit', (codigo, sinal) => r({ codigo, sinal })));
+  t.after(() => {
+    if (filho.exitCode == null && filho.signalCode == null) filho.kill('SIGKILL');
+  });
+  return { filho, saida, fim };
+}
+
+test('MOISES_COMANDOS=0 e MOISES_SUBIR_TEXTO=0 escritos no coletor.env valem; o ambiente do processo vale por cima', async (t) => {
+  // 1. Só o arquivo: canal desligado e texto que não sobe.
+  const amb = ambiente();
+  const painel = await painelFalso(t, amb.token);
+  const linhas = (p, a) => [
+    `MOISES_URL=${p.url}`, `MOISES_TOKEN=${a.token}`, `MOISES_CHAVES_ARQ=${a.chavesArq}`, `MOISES_PROJETOS=${a.projetosArq}`,
+    'MOISES_INTERVALO_MS=1000', 'MOISES_INTERVALO_RAPIDO_MS=1000', 'MOISES_COMANDOS=0', 'MOISES_SUBIR_TEXTO=0',
+  ];
+  const p1 = processoComConf(t, amb, linhas(painel, amb));
+  const r = await ate(() => painel.retratos()[0], 'retrato do processo');
+  assert.deepEqual([r.orquestracao.ativa, r.orquestracao.motivo], [false, 'desligado']);
+  assert.match(p1.saida.texto, /comandos: desligados \(desligado\); texto: não sobe/);
+  p1.filho.kill('SIGTERM');
+  assert.deepEqual(await p1.fim, { codigo: 0, sinal: null });
+
+  // 2. MOISES_COMANDOS=1 no ambiente ganha do arquivo; o texto continua sem subir (pedido de permissão sem a entrada).
+  const amb2 = ambiente();
+  const painel2 = await painelFalso(t, amb2.token);
+  const p2 = processoComConf(t, amb2, linhas(painel2, amb2), { MOISES_COMANDOS: '1' });
+  const r2 = await ate(() => painel2.retratos()[0], 'retrato do segundo processo');
+  assert.deepEqual([r2.orquestracao.ativa, r2.orquestracao.motivo], [true, null]);
+  assert.match(p2.saida.texto, /comandos: ligados; texto: não sobe/);
+  const abrir = assinar(amb2.ap.chave, {
+    v: 1, kid: amb2.ap.kid, id: novoId(), tipo: 'abrir', chave: null, criadoEm: Date.now(),
+    dados: JSON.stringify({ projeto: 'projeto-x', pedido: 'permissao:echo COMANDO-SECRETO', nome: 'sem texto' }),
+  });
+  painel2.fila.push({ ...abrir, idadeMs: 5 });
+  const feito = await ate(() => painel2.acks().find((a) => a.id === abrir.id && a.estado !== 'recebido'), 'resultado do abrir', 20_000);
+  assert.equal(feito.estado, 'feito', JSON.stringify(feito));
+  const comPedido = await ate(
+    () => painel2.retratos().find((x) => x.sessoes.some((s) => s.chave === feito.chaveNova && s.permissoes?.length)),
+    'pedido de permissão no retrato',
+    20_000,
+  );
+  const [pedido] = comPedido.sessoes.find((s) => s.chave === feito.chaveNova).permissoes;
+  assert.deepEqual([pedido.ferramenta, pedido.entrada, pedido.completo], ['Bash', '', false]);
+  assert.ok(!JSON.stringify(painel2.pedidos).includes('COMANDO-SECRETO'));
+  p2.filho.kill('SIGTERM');
+  assert.deepEqual(await p2.fim, { codigo: 0, sinal: null });
+  assert.deepEqual(processosCom(feito.chaveNova.split(':')[1]), [], 'a sessão morreu com o coletor');
 });

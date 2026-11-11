@@ -8,8 +8,12 @@ import { processoConfere, inicioDoProcesso, nomeConta } from './sessoes.js';
 import { diaLocal } from './transcript.js';
 
 export const EXPIRA_MS = 120_000;
-const limiteConfig = Number(process.env.MOISES_ENCERRAR_POR_HORA);
-export const MAX_POR_HORA = Number.isFinite(limiteConfig) && limiteConfig >= 0 ? limiteConfig : 5;
+// Lido a cada uso: a variável pode chegar do coletor.env depois da importação.
+export function maxPorHora() {
+  const bruto = process.env.MOISES_ENCERRAR_POR_HORA;
+  const n = bruto == null || bruto === '' ? NaN : Number(bruto);
+  return Number.isFinite(n) && n >= 0 ? n : 5;
+}
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function nomePadrao(sessao, agora = Date.now()) {
@@ -72,7 +76,8 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
   gravarLimites();
   if (!(cmd.idadeMs >= 0 && cmd.idadeMs < EXPIRA_MS)) return { ok: false, erro: 'Pedido antigo demais; peça de novo.' };
   while (recentes.length && agora() - recentes[0] > 3600_000) recentes.shift();
-  if (recentes.length >= MAX_POR_HORA) return { ok: false, erro: `Limite de ${MAX_POR_HORA} encerramentos por hora atingido.` };
+  const porHora = maxPorHora();
+  if (recentes.length >= porHora) return { ok: false, erro: `Limite de ${porHora} encerramentos por hora atingido.` };
 
   const sep = String(cmd.chave || '').indexOf(':');
   if (sep < 1) return { ok: false, erro: 'Pedido sem sessão válida.' };

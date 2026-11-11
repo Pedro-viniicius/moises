@@ -760,3 +760,19 @@ test('log de encerramento não leva tarefa vinda do pedido', async (t) => {
   assert.ok(!JSON.stringify(r.log).includes('Pedido que não'));
   assert.match(r.log.nome, /projeto-a – minha-sessao$/);
 });
+
+test('limite de encerramentos por hora é lido no uso, não na importação (vale quando vem do coletor.env)', async () => {
+  const { maxPorHora } = await import('../collector/encerrar.js');
+  const antes = process.env.MOISES_ENCERRAR_POR_HORA;
+  try {
+    delete process.env.MOISES_ENCERRAR_POR_HORA;
+    assert.equal(maxPorHora(), 5);
+    process.env.MOISES_ENCERRAR_POR_HORA = '2';
+    assert.equal(maxPorHora(), 2);
+    process.env.MOISES_ENCERRAR_POR_HORA = 'x';
+    assert.equal(maxPorHora(), 5);
+  } finally {
+    if (antes === undefined) delete process.env.MOISES_ENCERRAR_POR_HORA;
+    else process.env.MOISES_ENCERRAR_POR_HORA = antes;
+  }
+});

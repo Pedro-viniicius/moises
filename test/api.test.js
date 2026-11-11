@@ -19,7 +19,12 @@ process.env.PANEL_PASSWORD_HASH = gerarHashSenha(SENHA);
 process.env.SESSION_SECRET = 'x'.repeat(48);
 process.env.MOISES_TOKEN = 'y'.repeat(43);
 
-beforeEach(() => redisFalso.limpar());
+// O retrato do coletor anuncia os aparelhos autorizados: sem ele, o servidor não aceita comando (A4).
+const RETRATO_INICIAL = { dia: '2026-11-10', totalDia: 0, sessoes: [], orquestracao: { ativa: true, motivo: null, aparelhos: [{ kid: 'ab2cd3', rotulo: 'celular' }] } };
+beforeEach(() => {
+  redisFalso.limpar();
+  redisFalso.db.set('moises:retrato', JSON.stringify(RETRATO_INICIAL));
+});
 
 async function chamar(handler, { method = 'GET', url = '/', body, headers = {} } = {}) {
   const txt = body === undefined ? '' : JSON.stringify(body);
@@ -43,7 +48,7 @@ async function entrar() {
 
 const coletor = { authorization: `Bearer ${'y'.repeat(43)}` };
 const CHAVE = 'principal:4e00abb1-1234-4abc-8def-0123456789ab';
-const retrato = (status = 'ativa') => ({ dia: '2026-11-10', totalDia: 1, sessoes: [{ chave: CHAVE, projeto: 'p', status, custo: 1 }] });
+const retrato = (status = 'ativa') => ({ ...RETRATO_INICIAL, totalDia: 1, sessoes: [{ chave: CHAVE, projeto: 'p', status, custo: 1 }] });
 
 // O servidor não tem a chave do aparelho: confere só o formato. Qualquer string base64url de 43 caracteres serve.
 const ASSINATURA = 'AbCd_-0123456789abcdefghijklmnopqrstuvwxyzA';
@@ -96,7 +101,7 @@ test('rotas do painel exigem cookie válido', async () => {
   const cookie = await entrar();
   const r = await chamar(estado, { headers: { cookie } });
   assert.equal(r.statusCode, 200);
-  assert.deepEqual(r.body, { retrato: null, recebidoEm: null, comandos: [] });
+  assert.deepEqual(r.body, { retrato: RETRATO_INICIAL, recebidoEm: null, comandos: [] });
   assert.equal((await chamar(logout, { method: 'POST' })).h['set-cookie'].includes('Max-Age=0'), true);
 });
 
@@ -107,7 +112,7 @@ test('ingest exige o token do coletor', async () => {
 
 test('fluxo completo: retrato → comando encerrar → coletor confirma e executa → log no histórico, nome editável', async () => {
   const cookie = await entrar();
-  await chamar(ingest, { method: 'POST', body: { retrato: retrato() }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato:retrato() }, headers: coletor });
   const e1 = await chamar(estado, { headers: { cookie } });
   assert.equal(e1.body.retrato.sessoes[0].chave, CHAVE);
   assert.ok(e1.body.recebidoEm > 0);
@@ -117,22 +122,22 @@ test('fluxo completo: retrato → comando encerrar → coletor confirma e execut
   assert.equal(pedido.statusCode, 200);
   assert.deepEqual(pedido.body, { id: enviado.id });
 
-  const ing = await chamar(ingest, { method: 'POST', body: { retrato: null }, headers: coletor });
+  const ing = await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato:null }, headers: coletor });
   assert.equal(ing.body.comandos.length, 1);
   const cmd = ing.body.comandos[0];
   assert.equal(cmd.chave, CHAVE);
   assert.equal(cmd.tipo, 'encerrar');
   assert.equal(cmd.dados, enviado.dados);
 
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: cmd.id, estado: 'recebido' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: cmd.id, estado: 'recebido' }] }, headers: coletor });
   assert.equal((await chamar(estado, { headers: { cookie } })).body.comandos[0].estado, 'recebido');
   const log = { nome: '2026-11-10 p – teste', projeto: 'p', custo: 1.5, duracaoMs: 60000, intruso: 'x'.repeat(10) };
-  await chamar(ingest, { method: 'POST', body: { retrato: retrato('encerrada'), acks: [{ id: cmd.id, estado: 'feito', erro: null, log }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato:retrato('encerrada'), acks: [{ id: cmd.id, estado: 'feito', erro: null, log }] }, headers: coletor });
   const e2 = await chamar(estado, { headers: { cookie } });
   assert.equal(e2.body.comandos[0].estado, 'feito');
-  assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos.length, 0);
+  assert.equal((await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.comandos.length, 0);
   // um ack atrasado não faz o comando voltar de estado
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: cmd.id, estado: 'recebido' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: cmd.id, estado: 'recebido' }] }, headers: coletor });
   assert.equal((await chamar(estado, { headers: { cookie } })).body.comandos[0].estado, 'feito');
 
   const l1 = await chamar(logs, { headers: { cookie } });
@@ -152,12 +157,12 @@ test('ack no formato antigo {id, ok, erro, log} continua valendo', async () => {
   const b = cmdValido();
   await chamar(comando, { method: 'POST', body: a, headers: { cookie } });
   await chamar(comando, { method: 'POST', body: b, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   const acks = [
     { id: a.id, ok: true, log: { nome: 'log antigo', projeto: 'p' } },
     { id: b.id, ok: false, erro: 'x'.repeat(300) },
   ];
-  await chamar(ingest, { method: 'POST', body: { acks }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks }, headers: coletor });
   const porId = Object.fromEntries((await chamar(estado, { headers: { cookie } })).body.comandos.map((c) => [c.id, c]));
   assert.equal(porId[a.id].estado, 'feito');
   assert.equal(porId[b.id].estado, 'falhou');
@@ -252,8 +257,8 @@ test('o 21º comando pendente dá 429', async () => {
   for (let i = 0; i < 20; i++) assert.equal((await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } })).statusCode, 200);
   assert.equal((await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } })).statusCode, 429);
   // o coletor confirma um: abre vaga
-  const [primeiro] = (await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos;
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: primeiro.id, estado: 'recebido' }] }, headers: coletor });
+  const [primeiro] = (await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.comandos;
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: primeiro.id, estado: 'recebido' }] }, headers: coletor });
   assert.equal((await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } })).statusCode, 200);
 });
 
@@ -271,7 +276,7 @@ test('ingest entrega o comando com dados e assinatura e o estado nunca os devolv
   assert.ok(!JSON.stringify(e1.body).includes(MARCA));
   assert.ok(!JSON.stringify(e1.body).includes(ASSINATURA));
 
-  const ing = await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  const ing = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   assert.equal(ing.body.comandos.length, 1);
   const { idadeMs, ...entregue } = ing.body.comandos[0];
   assert.deepEqual(entregue, c);
@@ -286,7 +291,7 @@ test('ingest entrega no máximo 20 comandos e conta a idade pela hora do servido
   const cookie = await entrar();
   // relógio do celular 1 h atrasado: a idade não depende dele
   await chamar(comando, { method: 'POST', body: cmdValido({ criadoEm: Date.now() - 3_600_000 }), headers: { cookie } });
-  const ing = await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  const ing = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   assert.equal(ing.body.comandos.length, 1);
   assert.ok(ing.body.comandos[0].idadeMs < 5_000);
 
@@ -296,7 +301,7 @@ test('ingest entrega no máximo 20 comandos e conta a idade pela hora do servido
     const c = { ...cmdValido(), estado: 'pendente', erro: null, criadoEm: agora - i };
     redisFalso.db.get('moises:cmds').set(c.id, JSON.stringify(c));
   }
-  const ing2 = await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  const ing2 = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   assert.equal(ing2.body.comandos.length, 20);
 });
 
@@ -304,28 +309,28 @@ test('ack recebido apaga dados e assinatura do Redis', async () => {
   const cookie = await entrar();
   const c = cmdValido();
   await chamar(comando, { method: 'POST', body: c, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   assert.equal(guardado(c.id).dados, c.dados);
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
   const g = guardado(c.id);
   assert.equal(g.estado, 'recebido');
   assert.equal('dados' in g, false);
   assert.equal('assinatura' in g, false);
   assert.ok(!redisFalso.db.get('moises:cmds').get(c.id).includes(MARCA));
   // recebido não é entregue de novo
-  assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos.length, 0);
+  assert.equal((await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.comandos.length, 0);
   // ack de id desconhecido é ignorado
-  const r = await chamar(ingest, { method: 'POST', body: { acks: [{ id: 'c_ffffffffffffffff', estado: 'feito' }, null, 'x'] }, headers: coletor });
+  const r = await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: 'c_ffffffffffffffff', estado: 'feito' }, null, 'x'] }, headers: coletor });
   assert.equal(r.statusCode, 200);
 });
 
 test('comando expirado perde dados e assinatura', async () => {
   const cookie = await entrar();
-  await chamar(ingest, { method: 'POST', body: { retrato: retrato() }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato:retrato() }, headers: coletor });
   const c = cmdValido({ tipo: 'encerrar' });
   await chamar(comando, { method: 'POST', body: c, headers: { cookie } });
   await comRelogio(121_000, async () => {
-    const ing = await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+    const ing = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
     assert.equal(ing.body.comandos.length, 0);
   });
   const g = guardado(c.id);
@@ -335,7 +340,7 @@ test('comando expirado perde dados e assinatura', async () => {
   const e = await chamar(estado, { headers: { cookie } });
   assert.equal(e.body.comandos[0].estado, 'expirado');
   // se o coletor pegou o comando pouco antes de expirar, o resultado dele prevalece
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: c.id, estado: 'feito' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'feito' }] }, headers: coletor });
   assert.equal(guardado(c.id).estado, 'feito');
 });
 
@@ -383,7 +388,7 @@ test('estado marca como expirado o pendente vencido mesmo com o coletor parado',
   // O que ainda está na validade continua inteiro para o coletor.
   assert.equal(guardado(novo.id).dados, novo.dados);
   // Se o coletor confirmar depois, o resultado dele prevalece, como no ingest.
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: vencido.id, estado: 'feito' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: vencido.id, estado: 'feito' }] }, headers: coletor });
   assert.equal(guardado(vencido.id).estado, 'feito');
 });
 
@@ -394,13 +399,13 @@ test('ack feito de abrir grava a chave nova', async () => {
   const msg = cmdValido();
   const ruim = cmdValido({ tipo: 'abrir', chave: null });
   for (const c of [abrir, msg, ruim]) await chamar(comando, { method: 'POST', body: c, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   const acks = [
     { id: abrir.id, estado: 'feito', chaveNova: novaChave },
     { id: msg.id, estado: 'feito', chaveNova: novaChave }, // só vale para abrir
     { id: ruim.id, estado: 'feito', chaveNova: '../../etc' }, // fora do formato
   ];
-  await chamar(ingest, { method: 'POST', body: { acks }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks }, headers: coletor });
   const porId = Object.fromEntries((await chamar(estado, { headers: { cookie } })).body.comandos.map((c) => [c.id, c]));
   assert.equal(porId[abrir.id].chave, novaChave);
   assert.equal(porId[abrir.id].estado, 'feito');
@@ -412,13 +417,13 @@ test('ack recusado guarda o erro e o motivo, e motivo fora do formato é descart
   const cookie = await entrar();
   const [a, b, c] = [cmdValido(), cmdValido(), cmdValido()];
   for (const x of [a, b, c]) await chamar(comando, { method: 'POST', body: x, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
   const acks = [
     { id: a.id, estado: 'recusado', erro: 'Este aparelho não está autorizado neste computador.', motivo: 'aparelho' },
     { id: b.id, estado: 'recusado', erro: 'x'.repeat(250), motivo: 'Motivo<script>' },
     { id: c.id, estado: 'recusado', motivo: 'a'.repeat(21) },
   ];
-  await chamar(ingest, { method: 'POST', body: { acks }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks }, headers: coletor });
   const porId = Object.fromEntries((await chamar(estado, { headers: { cookie } })).body.comandos.map((x) => [x.id, x]));
   assert.deepEqual(
     { estado: porId[a.id].estado, erro: porId[a.id].erro, motivo: porId[a.id].motivo },
@@ -433,7 +438,7 @@ test('ack recusado guarda o erro e o motivo, e motivo fora do formato é descart
   // estado desconhecido no ack não muda o comando
   const d = cmdValido();
   await chamar(comando, { method: 'POST', body: d, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: d.id, estado: 'apagado' }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: d.id, estado: 'apagado' }] }, headers: coletor });
   assert.equal(guardado(d.id).estado, 'pendente');
 });
 
@@ -441,11 +446,11 @@ test('comando recebido há 10 min sem resultado vira falhou', async () => {
   const cookie = await entrar();
   const c = cmdValido();
   await chamar(comando, { method: 'POST', body: c, headers: { cookie } });
-  await chamar(ingest, { method: 'POST', body: {}, headers: coletor });
-  await chamar(ingest, { method: 'POST', body: { acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
-  await comRelogio(590_000, () => chamar(ingest, { method: 'POST', body: {}, headers: coletor }));
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, acks: [{ id: c.id, estado: 'recebido' }] }, headers: coletor });
+  await comRelogio(590_000, () => chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor }));
   assert.equal(guardado(c.id).estado, 'recebido');
-  await comRelogio(601_000, () => chamar(ingest, { method: 'POST', body: {}, headers: coletor }));
+  await comRelogio(601_000, () => chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor }));
   const e = await chamar(estado, { headers: { cookie } });
   assert.equal(e.body.comandos[0].estado, 'falhou');
   assert.equal(e.body.comandos[0].erro, 'O coletor não confirmou o resultado.');
@@ -453,16 +458,95 @@ test('comando recebido há 10 min sem resultado vira falhou', async () => {
 
 test('estado grava painelVistoEm e o ingest devolve', async () => {
   const cookie = await entrar();
-  assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.painelVistoEm, null);
+  assert.equal((await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.painelVistoEm, null);
   const antes = Date.now();
   await chamar(estado, { headers: { cookie } });
-  const visto = (await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.painelVistoEm;
+  const visto = (await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.painelVistoEm;
   assert.equal(typeof visto, 'number');
   assert.ok(visto >= antes && visto <= Date.now());
   // sem login, o painel não conta como visto
   redisFalso.limpar();
   await chamar(estado);
-  assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.painelVistoEm, null);
+  assert.equal((await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor })).body.painelVistoEm, null);
+});
+
+test('painelVistoEm é gravado no máximo a cada 30 s', async () => {
+  const cookie = await entrar();
+  const visto = () => Number(redisFalso.db.get('moises:painelVistoEm'));
+  await chamar(estado, { headers: { cookie } });
+  const primeiro = visto();
+  assert.ok(primeiro > 0);
+  await comRelogio(29_000, () => chamar(estado, { headers: { cookie } }));
+  assert.equal(visto(), primeiro, 'antes de 30 s não regrava');
+  await comRelogio(30_500, () => chamar(estado, { headers: { cookie } }));
+  assert.ok(visto() >= primeiro + 30_000, 'depois de 30 s regrava');
+  // Valor no futuro (relógio do servidor mudou) ou lixo: regrava com a hora atual.
+  redisFalso.db.set('moises:painelVistoEm', String(Date.now() + 3_600_000));
+  await chamar(estado, { headers: { cookie } });
+  assert.ok(visto() <= Date.now());
+  redisFalso.db.set('moises:painelVistoEm', 'lixo');
+  await chamar(estado, { headers: { cookie } });
+  assert.ok(visto() > 0);
+});
+
+test('o retrato no Redis vale 24 h', async () => {
+  const cookie = await entrar();
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato: retrato() }, headers: coletor });
+  await comRelogio(24 * 3600_000 - 60_000, async () => {
+    assert.equal((await chamar(estado, { headers: { cookie } })).body.retrato.sessoes[0].chave, CHAVE);
+  });
+  await comRelogio(24 * 3600_000 + 1_000, async () => {
+    assert.equal((await chamar(estado, { headers: { cookie } })).body.retrato, null);
+  });
+  // Um retrato novo renova a validade; ingest sem retrato não mexe nela.
+  await chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato: retrato() }, headers: coletor });
+  await comRelogio(20 * 3600_000, () => chamar(ingest, { method: 'POST', body: { protocolo: 2, retrato: retrato('encerrada') }, headers: coletor }));
+  await comRelogio(30 * 3600_000, async () => {
+    assert.equal((await chamar(estado, { headers: { cookie } })).body.retrato.sessoes[0].status, 'encerrada');
+  });
+});
+
+test('o ingest só entrega comandos ao coletor que anuncia protocolo 2', async () => {
+  const cookie = await entrar();
+  const c = cmdValido({ tipo: 'encerrar', dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
+  assert.equal((await chamar(comando, { method: 'POST', body: c, headers: { cookie } })).statusCode, 200);
+  // O coletor antigo (sem protocolo, ou com outro) não recebe nada; o retrato e os acks dele continuam valendo.
+  for (const protocolo of [undefined, 1, '2', 3]) {
+    const r = await chamar(ingest, { method: 'POST', body: { protocolo, retrato: retrato() }, headers: coletor });
+    assert.equal(r.statusCode, 200);
+    assert.deepEqual(r.body.comandos, [], `protocolo ${protocolo}`);
+  }
+  assert.equal(guardado(c.id).estado, 'pendente');
+  assert.equal(guardado(c.id).dados, c.dados, 'o comando continua guardado para o coletor novo');
+  const novo = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
+  assert.deepEqual(novo.body.comandos.map((x) => x.id), [c.id]);
+});
+
+test('POST /api/comando só aceita aparelho anunciado pelo coletor', async () => {
+  const cookie = await entrar();
+  // Aparelho que o coletor não anunciou: 403, nada gravado.
+  const estranho = await chamar(comando, { method: 'POST', body: cmdValido({ kid: 'zz9zz9' }), headers: { cookie } });
+  assert.equal(estranho.statusCode, 403);
+  assert.equal(estranho.body.erro, 'Este aparelho não está autorizado neste computador.');
+  assert.equal(redisFalso.db.get('moises:cmds'), undefined);
+  // O anunciado passa.
+  assert.equal((await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } })).statusCode, 200);
+  // Retrato sem a seção orquestracao (coletor antigo) ou com aparelhos fora do formato: ninguém passa.
+  for (const r of [{ sessoes: [] }, { sessoes: [], orquestracao: { aparelhos: 'ab2cd3' } }, { sessoes: [], orquestracao: { aparelhos: [null, 'ab2cd3', { kid: 7 }] } }]) {
+    redisFalso.db.set('moises:retrato', JSON.stringify(r));
+    assert.equal((await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } })).statusCode, 403, JSON.stringify(r));
+  }
+  // Sem retrato (expirou, ou o coletor nunca mandou) ou retrato corrompido: 503.
+  for (const bruto of [undefined, '{quebrado', 'null']) {
+    if (bruto === undefined) redisFalso.db.delete('moises:retrato');
+    else redisFalso.db.set('moises:retrato', bruto);
+    const r = await chamar(comando, { method: 'POST', body: cmdValido(), headers: { cookie } });
+    assert.equal(r.statusCode, 503, String(bruto));
+    assert.equal(r.body.erro, 'O coletor ainda não mandou o estado deste computador. Tente de novo em instantes.');
+  }
+  assert.equal(redisFalso.db.get('moises:cmds').size, 1, 'só o anunciado foi gravado');
+  // Formato inválido continua dando 400 antes de olhar o retrato.
+  assert.equal((await chamar(comando, { method: 'POST', body: cmdValido({ kid: 'AB' }), headers: { cookie } })).statusCode, 400);
 });
 
 test('cabeçalhos: CSP com trusted types e COOP', () => {

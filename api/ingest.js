@@ -15,6 +15,10 @@ import {
 
 const GUARDA_CMD_MS = 24 * 3600 * 1000;
 const SEM_RESULTADO_MS = 10 * 60 * 1000;
+// O retrato leva resumos de sessão: some do Redis se o coletor ficar 24 h sem mandar outro.
+const VALIDADE_RETRATO_S = 24 * 3600;
+// Só o coletor que confere assinatura anuncia este protocolo; o antigo executaria encerrar sem conferir.
+const PROTOCOLO_COLETOR = 2;
 const CAMPOS_LOG = ['projeto', 'conta', 'tarefa', 'resumo', 'iniciadaEm', 'encerradaEm', 'duracaoMs', 'modelo', 'esforco', 'porModelo', 'tokens', 'custo'];
 // Um ack só faz o comando andar para a frente: pendente/expirado → recebido → feito | falhou | recusado.
 // O expirado aceita ack porque o coletor pode ter recebido o comando pouco antes de o servidor expirá-lo.
@@ -30,12 +34,12 @@ function estadoDoAck(a) {
 
 export default rota(['POST'], async (req, res) => {
   if (!tokenColetorValido(req)) return json(res, 401, { erro: 'Token inválido.' });
-  const { retrato, acks } = await lerCorpo(req);
+  const { retrato, acks, protocolo } = await lerCorpo(req);
   const agora = Date.now();
   const [, cmdsArr, painelVistoEm] = await pipeline([['SET', K.recebidoEm, String(agora)], ['HGETALL', K.cmds], ['GET', K.painelVistoEm]]);
   const cmds = new Map(hashParaObjetos(cmdsArr).map((c) => [c.id, c]));
   const muda = [];
-  if (retrato && typeof retrato === 'object' && Array.isArray(retrato.sessoes)) muda.push(['SET', K.retrato, JSON.stringify(retrato)]);
+  if (retrato && typeof retrato === 'object' && Array.isArray(retrato.sessoes)) muda.push(['SET', K.retrato, JSON.stringify(retrato), 'EX', VALIDADE_RETRATO_S]);
 
   for (const a of Array.isArray(acks) ? acks : []) {
     if (!a || typeof a !== 'object' || typeof a.id !== 'string') continue;
@@ -77,6 +81,8 @@ export default rota(['POST'], async (req, res) => {
     }
   }
   await pipeline(muda);
+  // Para o coletor antigo, nada: os pendentes ficam guardados até expirar ou até o coletor novo buscar.
+  if (protocolo !== PROTOCOLO_COLETOR) pendentes.length = 0;
   const comandos = pendentes
     .sort((a, b) => chegadaDoComando(a) - chegadaDoComando(b))
     .slice(0, MAX_PENDENTES)

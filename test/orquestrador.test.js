@@ -474,6 +474,8 @@ test('responder duas vezes ao mesmo pedido dá erro', async (t) => {
   assert.equal((await ctx.orq.executar(cmd('permissao', chave), { pedido: 'req_99', decisao: 'negar', visto: vistoDe(ctx, chave) })).erro, naoPendente);
   // O outro pedido não foi afetado.
   assert.deepEqual(ctx.publicada(chave).permissoes.map((x) => x.pedido), [dois.pedido]);
+  // O falso grava a linha recebida só quando a lê do stdin: espera em vez de conferir na hora (falhava sob carga).
+  await ate(() => respostas(ctx).length >= 1, 'resposta chegar ao filho');
   assert.equal(respostas(ctx).length, 1);
   assert.equal((await responder(ctx, chave, dois, 'negar')).ok, true);
   await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'turno terminar');

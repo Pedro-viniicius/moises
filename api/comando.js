@@ -6,7 +6,6 @@ import {
   exigeLogin,
   exigeJson,
   lerCorpo,
-  redis,
   pipeline,
   hashParaObjetos,
   expirarSeVencido,
@@ -28,6 +27,20 @@ function dadosValidos(dados) {
   } catch {
     return false;
   }
+}
+
+// kids dos aparelhos que o coletor anunciou no último retrato; null se não há retrato legível.
+// Retrato sem a seção orquestracao (coletor antigo) anuncia nenhum.
+function aparelhosAnunciados(bruto) {
+  let retrato;
+  try {
+    retrato = JSON.parse(bruto);
+  } catch {
+    return null;
+  }
+  if (retrato === null || typeof retrato !== 'object') return null;
+  const lista = retrato.orquestracao?.aparelhos;
+  return Array.isArray(lista) ? lista.filter((a) => a && typeof a.kid === 'string').map((a) => a.kid) : [];
 }
 
 // Devolve o nome do primeiro campo fora do contrato, ou null. Nunca devolve conteúdo.
@@ -54,7 +67,13 @@ export default rota(['POST'], async (req, res) => {
   if (invalido) return json(res, 400, { erro: `Comando inválido (${invalido}).` });
 
   const agora = Date.now();
-  const cmds = hashParaObjetos(await redis('HGETALL', K.cmds));
+  const [retrato, cmdsArr] = await pipeline([['GET', K.retrato], ['HGETALL', K.cmds]]);
+  // Só aparelho que o coletor anunciou: quem tem só o cookie não enche a fila com comandos que o
+  // coletor recusaria (A4). Quem decide de verdade continua sendo o coletor, pela assinatura.
+  const aparelhos = retrato ? aparelhosAnunciados(retrato) : null;
+  if (!aparelhos) return json(res, 503, { erro: 'O coletor ainda não mandou o estado deste computador. Tente de novo em instantes.' });
+  if (!aparelhos.includes(corpo.kid)) return json(res, 403, { erro: 'Este aparelho não está autorizado neste computador.' });
+  const cmds = hashParaObjetos(cmdsArr);
   if (cmds.some((c) => c.id === corpo.id)) return json(res, 409, { erro: 'Esse comando já foi enviado.' });
   // Com o coletor parado ninguém expira os pendentes: expira aqui também, para não guardar o conteúdo
   // além da validade e para os vencidos não ocuparem vaga.
