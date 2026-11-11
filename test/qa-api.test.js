@@ -44,7 +44,8 @@ async function entrar() {
 }
 const coletor = { authorization: `Bearer ${'y'.repeat(43)}` };
 const CHAVE = 'principal:4e00abb1-1234-4abc-8def-0123456789ab';
-const ASSINATURA = 'QaQa_-0123456789abcdefghijklmnopqrstuvwxyzQ';
+// Rodada 2 (A1): a assinatura passou a ser ECDSA P-256 (IEEE P1363) em base64url, 86 caracteres.
+const ASSINATURA = 'QaQa_-0123456789abcdefghijklmnopqrstuvwxyz'.repeat(3).slice(0, 85) + 'Q';
 const MARCA = 'TEXTO-SIGILOSO-QA';
 let seq = 0;
 const cmdValido = (extra = {}) => ({
@@ -254,14 +255,21 @@ test('CA9 e CA10: o painel desabilita as ações com o coletor fora do ar e pede
   assert.match(js, /await esquecer\(\);[\s\S]{0,200}location\.href = '\/login\.html'/);
 });
 
-test('o cofre só guarda chave não extraível e o código digitado fica fora de <form>', () => {
+// Rodada 2 (A1): não existe mais código do aparelho digitado na página; o aparelho gera o próprio par de
+// chaves e só o nome dele é digitado (fora de <form>, sem preenchimento automático).
+test('o cofre só guarda chave não extraível e nada secreto é digitado no painel', () => {
   const cofre = lerPublico('cofre.js');
   assert.match(cofre, /chave\.extractable === false/);
   assert.match(cofre, /throw new TypeError\('Chave do aparelho inválida\.'\)/);
   const html = lerPublico('index.html');
-  const campo = html.match(/<input[^>]*id="codigo"[^>]*>/);
-  assert.ok(campo, 'campo do código');
+  assert.ok(!/id="codigo"/.test(html), 'campo do código não existe mais');
+  assert.ok(!/type="password"/.test(html), 'nenhum campo de senha no painel');
+  const campo = html.match(/<input[^>]*id="autorizar-rotulo"[^>]*>/);
+  assert.ok(campo, 'campo do nome do aparelho');
   assert.match(campo[0], /autocomplete="off"/);
-  // Nenhum <form> contém o campo do código.
-  for (const f of html.matchAll(/<form\b[\s\S]*?<\/form>/gi)) assert.ok(!/id="codigo"/.test(f[0]), 'o campo do código está dentro de um form');
+  for (const f of html.matchAll(/<form\b[\s\S]*?<\/form>/gi)) assert.ok(!/id="autorizar-rotulo"/.test(f[0]), 'o nome do aparelho está dentro de um form');
+  // A chave nasce no aparelho e só a pública sai, pelo pedido de autorização.
+  const js = lerPublico('app.js');
+  assert.match(js, /const novo = await gerarAparelho\(\);/);
+  assert.match(js, /api\('\/api\/aparelho', jsonOpcoes\('POST', \{ kid: ap\.kid, publica: ap\.publica, rotulo \}\)\)/);
 });

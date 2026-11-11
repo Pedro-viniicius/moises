@@ -13,6 +13,7 @@ import { Ideias } from '../collector/ideias.js';
 import { executarEncerrar, reiniciarLimites } from '../collector/encerrar.js';
 import * as col from '../collector/assinatura.js';
 import * as nav from '../public/assinatura.js';
+import { aparelho as novoAparelho, assinarCom } from './fixtures/aparelho.js';
 
 // O ambiente de quem roda os testes não pode desligar o canal por acidente.
 delete process.env.MOISES_COMANDOS;
@@ -23,29 +24,35 @@ const VISTO = { projeto: 'moises', nome: 'sessão de teste' };
 const MSG_SECRETA = 'TEXTO-DA-MENSAGEM-que-nao-pode-ir-para-a-auditoria';
 const HASH = 'a'.repeat(64);
 
-// A derivação custa 210.000 iterações: um código e as duas chaves dele, uma vez só.
-const codigo = col.gerarCodigo();
-const doNavegador = await nav.derivarChave(codigo);
-const doColetor = col.derivarChave(codigo);
+// Um aparelho do navegador (par ECDSA P-256 gerado por public/assinatura.js), uma vez só.
+const doNavegador = await nav.gerarAparelho();
 
 let seq = 0;
 const novoId = () => `c_${(++seq).toString(16).padStart(16, '0')}`;
 
-const aparelho = (kid, rotulo) => ({ kid, rotulo, chave: crypto.randomBytes(32) });
+// Aparelho com par de chaves gerado no Node; o kid fixo é o que o arquivo de chaves diz.
+const aparelho = (kid, rotulo) => novoAparelho(kid, rotulo);
 
+// chaves-comandos.json no formato que `configurar-comandos.js --autorizar` grava.
 function gravarChaves(arquivo, aparelhos, modo = 0o600) {
   const json = {};
-  for (const a of aparelhos) json[a.kid] = { rotulo: a.rotulo, chave: a.chave.toString('hex'), criadaEm: new Date(T0).toISOString() };
+  for (const a of aparelhos) json[a.kid] = { rotulo: a.rotulo, publica: a.publica, criadaEm: new Date(T0).toISOString() };
   const tmp = `${arquivo}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(json), { mode: modo });
   fs.chmodSync(tmp, modo);
   fs.renameSync(tmp, arquivo);
 }
 
-function assinar(chave, cmd) {
-  const assinatura = crypto.createHmac('sha256', chave).update(col.textoDoComando(cmd), 'utf8').digest('base64url');
-  return { ...cmd, assinatura };
+// Grava o objeto como está (para entradas fora do formato), também por temporário e rename.
+function gravarChavesBrutas(arquivo, json) {
+  const tmp = `${arquivo}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(json), { mode: 0o600 });
+  fs.renameSync(tmp, arquivo);
 }
+
+const assinar = (privada, cmd) => assinarCom(privada, cmd);
+// Assinatura que tem o formato certo (86 caracteres base64url canônicos) mas não confere.
+const ASSINATURA_ERRADA = 'A'.repeat(86);
 
 // Monta chaveiro, auditoria e porteiro numa pasta temporária apagada no fim do teste.
 function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq, semChaves = false } = {}) {
@@ -69,7 +76,7 @@ function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq,
   const porteiro = novoPorteiro();
   // Comando de mensagem válido, assinado pelo primeiro aparelho; `campos` substitui antes de assinar.
   const comando = (campos = {}, ap = aps[0]) =>
-    assinar(ap.chave, {
+    assinar(ap.privada, {
       v: 1, kid: ap.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: relogio.agora,
       dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO }), ...campos,
     });
@@ -102,14 +109,14 @@ test('recusa comando sem credencial', (t) => {
     assert.equal(r.motivo, 'sem_credencial');
     assert.equal(typeof r.erro, 'string');
   }
-  assert.equal(assinatura.length, 43);
+  assert.equal(assinatura.length, 86);
   // Sem credencial, o id nem entra no conjunto de vistos.
   assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
 });
 
 test('recusa assinatura feita com outra chave', (t) => {
   const m = montar(t);
-  const outra = crypto.randomBytes(32);
+  const outra = aparelho().privada;
   const cmd = assinar(outra, { ...m.comando(), assinatura: undefined });
   const r = m.porteiro.conferir(cmd);
   assert.deepEqual([r.ok, r.motivo], [false, 'assinatura']);
@@ -128,6 +135,44 @@ test('recusa aparelho desconhecido', (t) => {
   assert.equal(r.ok, false);
   assert.equal(r.motivo, 'aparelho');
   assert.equal(r.erro, 'Este aparelho não está autorizado neste computador.');
+});
+
+test('recusa a assinatura HMAC antiga e a assinatura ECDSA não canônica ou em DER (achado A1)', (t) => {
+  const m = montar(t);
+  const base = m.comando();
+  // HMAC-SHA256 do mesmo texto com uma chave de 32 bytes, como no código do aparelho: 43 caracteres.
+  const hmac = crypto.createHmac('sha256', crypto.randomBytes(32)).update(col.textoDoComando(base), 'utf8').digest('base64url');
+  assert.equal(motivo(m.porteiro.conferir({ ...base, assinatura: hmac })), 'formato');
+  // A assinatura válida, com os bits de enchimento do último caractere trocados: decodifica igual, mas é recusada.
+  const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const outro = m.comando();
+  const naoCanonica = outro.assinatura.slice(0, 85) + B64URL[B64URL.indexOf(outro.assinatura[85]) ^ 1];
+  assert.equal(motivo(m.porteiro.conferir({ ...outro, assinatura: naoCanonica })), 'assinatura');
+  // A mesma assinatura em DER (tamanho variável) nem tem o formato.
+  const der = crypto.sign('sha256', Buffer.from(col.textoDoComando(base), 'utf8'), m.aps[0].privada).toString('base64url');
+  assert.equal(motivo(m.porteiro.conferir({ ...base, assinatura: der })), 'formato');
+  // Nenhuma dessas queimou o id: o comando certo ainda passa.
+  assert.equal(motivo(m.porteiro.conferir(outro)), 'aceito');
+  assert.equal(motivo(m.porteiro.conferir(base)), 'aceito');
+});
+
+test('aparelho com chave pública inválida no arquivo não existe para o porteiro', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  const json = JSON.parse(fs.readFileSync(m.chavesArq, 'utf8'));
+  const bytes = Buffer.from(json.xy7zw8.publica, 'base64url');
+  bytes[64] ^= 1; // ponto fora da curva
+  json.xy7zw8.publica = bytes.toString('base64url');
+  json.qqqqqq = { rotulo: 'formato antigo', chave: 'a'.repeat(64), criadaEm: new Date(T0).toISOString() };
+  gravarChavesBrutas(m.chavesArq, json);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }]);
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aparelho');
+  assert.equal(motivo(m.porteiro.conferir(m.comando({ kid: 'qqqqqq' }))), 'aparelho');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  // O chaveiro devolve a chave pública como KeyObject, nunca o texto do arquivo.
+  const { chave } = m.chaveiro.obter('ab2cd3');
+  assert.equal(chave.type, 'public');
+  assert.equal(chave.asymmetricKeyDetails.namedCurve, 'prime256v1');
 });
 
 test('recusa versão desconhecida', (t) => {
@@ -349,12 +394,12 @@ test('id já visto com data no futuro não regrava o arquivo de vistos nem gasta
 });
 
 test('aceita uma vez e recusa o mesmo comando repetido', async (t) => {
-  const m = montar(t, { aparelhos: [{ kid: doColetor.kid, rotulo: 'celular do dono', chave: doColetor.chave }] });
-  // Comando assinado de verdade pelo módulo do navegador, com a chave derivada do mesmo código.
+  const m = montar(t, { aparelhos: [{ kid: doNavegador.kid, rotulo: 'celular do dono', publica: doNavegador.publica }] });
+  // Comando assinado de verdade pelo módulo do navegador, com a chave privada não extraível do aparelho.
   const cmd = await nav.assinarComando(doNavegador, { tipo: 'mensagem', chave: SESSAO, dados: { texto: 'oi', visto: VISTO } }, T0);
   const r = m.porteiro.conferir(cmd);
   assert.equal(r.ok, true);
-  assert.equal(r.quem, `${doColetor.kid} (celular do dono)`);
+  assert.equal(r.quem, `${doNavegador.kid} (celular do dono)`);
   assert.deepEqual(r.dados, semProto({ texto: 'oi', visto: semProto(VISTO) }));
   // O id foi gravado em disco antes de conferir devolver ok.
   assert.deepEqual(vistosEm(m.estado), { [cmd.id]: T0 });
@@ -391,8 +436,8 @@ test('300 comandos lixo sem assinatura válida não fazem um comando já executa
   for (let i = 0; i < 300; i++) {
     const base = m.comando();
     const variantes = [
-      { ...base, assinatura: 'A'.repeat(43) }, // assinatura que não confere, id novo
-      { ...base, id: executado.id, assinatura: 'B'.repeat(43) }, // o mesmo id do executado, assinatura errada
+      { ...base, assinatura: ASSINATURA_ERRADA }, // assinatura que não confere, id novo
+      { ...base, id: executado.id, assinatura: 'B'.repeat(86) }, // o mesmo id do executado, assinatura errada
       { ...base, kid: 'qqqqqq' }, // aparelho desconhecido
       { ...base, id: `x_${i}` }, // id fora do formato
       (({ assinatura, ...s }) => s)(base), // sem assinatura
@@ -457,15 +502,32 @@ test('recusa tudo sem chave configurada', (t) => {
   assert.deepEqual(m.chaveiro.aparelhos(), []);
   assert.equal(motivo(m.porteiro.conferir(valido)), 'sem_chave');
   assert.equal(motivo(m.porteiro.conferir({})), 'sem_chave');
-  // JSON inválido, objeto vazio, lista e entradas fora do formato: nenhuma chave.
+  // JSON inválido, objeto vazio, lista e entradas fora do formato: nenhuma chave. Inclui a entrada do
+  // formato antigo (chave HMAC derivada do código), que não vale mais (achado A1), e chave pública
+  // inválida: fora do tamanho, comprimida, não canônica, com prefixo errado ou ponto fora da curva.
+  const bytes = Buffer.from(estranho.publica, 'base64url');
+  const comPrefixo = (p) => Buffer.concat([Buffer.from([p]), bytes.subarray(1)]).toString('base64url');
+  const foraDaCurva = Buffer.from(bytes);
+  foraDaCurva[64] ^= 1;
+  const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const naoCanonica = estranho.publica.slice(0, 86) + B64URL[B64URL.indexOf(estranho.publica.at(-1)) ^ 1];
+  const comPublica = (publica, kid = 'ab2cd3') => JSON.stringify({ [kid]: { rotulo: 'x', publica, criadaEm: new Date(T0).toISOString() } });
   const conteudos = [
     '{nao é json',
     '{}',
     '[]',
-    JSON.stringify({ AB2CD3: { rotulo: 'maiúsculo', chave: 'a'.repeat(64) } }),
-    JSON.stringify({ ab2cd: { rotulo: 'kid curto', chave: 'a'.repeat(64) } }),
-    JSON.stringify({ ab2cd3: { rotulo: 'chave curta', chave: 'a'.repeat(63) } }),
-    JSON.stringify({ ab2cd3: { rotulo: 'chave maiúscula', chave: 'A'.repeat(64) } }),
+    JSON.stringify({ ab2cd3: { rotulo: 'formato antigo', chave: 'a'.repeat(64) } }),
+    comPublica(estranho.publica, 'AB2CD3'),
+    comPublica(estranho.publica, 'ab2cd'),
+    comPublica(estranho.publica.slice(1)),
+    comPublica(`${estranho.publica}A`),
+    comPublica(naoCanonica),
+    comPublica(comPrefixo(2)),
+    comPublica(Buffer.concat([Buffer.from([2]), bytes.subarray(1, 33)]).toString('base64url')),
+    comPublica(foraDaCurva.toString('base64url')),
+    comPublica(Buffer.alloc(65).toString('base64url')),
+    comPublica(7),
+    JSON.stringify({ ab2cd3: { rotulo: 'as duas', chave: 'a'.repeat(64), publica: 'x' } }),
     JSON.stringify({ ab2cd3: 'sem objeto' }),
     JSON.stringify({ __proto__: null, ab2cd3: null }),
   ];
@@ -489,7 +551,7 @@ test('ignora arquivo de chaves com permissão 644', (t) => {
   assert.ok(avisos.mock.callCount() >= 1);
   const texto = avisos.mock.calls.map((c) => c.arguments.map(String).join(' ')).join('\n');
   for (const a of m.aps) {
-    assert.ok(!texto.includes(a.chave.toString('hex')));
+    assert.ok(!texto.includes(a.publica));
     assert.ok(!texto.includes(a.rotulo));
   }
   // Permissão 640 também é aberta demais.
@@ -620,7 +682,7 @@ test('formato é conferido antes da assinatura, inclusive a chave de sessão de 
     const cmd = m.comando(campos);
     assert.equal(motivo(m.porteiro.conferir(cmd)), 'formato', JSON.stringify(campos));
     // Com assinatura errada, continua sendo formato: a ordem não depende da chave.
-    assert.equal(motivo(m.porteiro.conferir({ ...cmd, assinatura: 'Z'.repeat(43) })), 'formato');
+    assert.equal(motivo(m.porteiro.conferir({ ...cmd, assinatura: ASSINATURA_ERRADA })), 'formato');
   }
   assert.equal(motivo(m.porteiro.conferir({ ...m.comando(), assinatura: 'curta' })), 'formato');
   assert.equal(motivo(m.porteiro.conferir({ ...m.comando(), assinatura: 42 })), 'formato');
@@ -630,7 +692,7 @@ test('o limite por minuto conta só comandos com assinatura válida', (t) => {
   t.mock.method(console, 'error', () => {});
   const m = montar(t);
   for (let i = 0; i < 100; i++) {
-    const cmd = { ...m.comando(), assinatura: crypto.randomBytes(32).toString('base64url') };
+    const cmd = { ...m.comando(), assinatura: crypto.randomBytes(64).toString('base64url') };
     assert.equal(motivo(m.porteiro.conferir(cmd)), 'assinatura');
   }
   for (let i = 0; i < 20; i++) assert.equal(motivo(m.porteiro.conferir(m.comando({ v: 2 }))), 'formato');
@@ -672,9 +734,9 @@ test('revogar um aparelho no arquivo passa a valer sem reiniciar', (t) => {
   assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aparelho');
   assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
   // Trocar a chave de um aparelho sem mudar o tamanho do arquivo também vale (gravação no mesmo arquivo).
-  const nova = { ...m.aps[0], chave: crypto.randomBytes(32) };
+  const nova = aparelho('ab2cd3', 'celular');
   const json = JSON.parse(fs.readFileSync(m.chavesArq, 'utf8'));
-  json.ab2cd3.chave = nova.chave.toString('hex');
+  json.ab2cd3.publica = nova.publica;
   fs.writeFileSync(m.chavesArq, JSON.stringify(json));
   // Data explícita: em kernel sem carimbo de tempo fino, duas gravações seguidas podem ter o mesmo mtime.
   fs.utimesSync(m.chavesArq, new Date(T0 + 1_000), new Date(T0 + 1_000));
@@ -710,7 +772,7 @@ test('cada recusa fica na auditoria com o motivo', (t) => {
     [m.comando({ v: 2 }), 'formato'],
     [m.comando({ tipo: 'apagar' }), 'verbo'],
     [m.comando({}, aparelho('qqqqqq', 'x')), 'aparelho'],
-    [{ ...m.comando(), assinatura: 'A'.repeat(43) }, 'assinatura'],
+    [{ ...m.comando(), assinatura: ASSINATURA_ERRADA }, 'assinatura'],
     [m.comando({ criadoEm: T0 - JANELA_MS }), 'expirado'],
     [m.comando({ criadoEm: T0 + 31_000 }), 'relogio'],
     [m.comando({ dados: '[]' }), 'formato'],
@@ -766,7 +828,7 @@ test('recusas em massa não empurram os aceitos para fora da auditoria', (t) => 
   const p = new Porteiro({ chaveiro: m.chaveiro, pastaEstado: m.estado, auditoria: aud, agora: () => m.relogio.agora });
   const aceito = m.comando();
   assert.equal(motivo(p.conferir(aceito)), 'aceito');
-  for (let i = 0; i < 200; i++) p.conferir({ ...m.comando(), assinatura: 'A'.repeat(43) });
+  for (let i = 0; i < 200; i++) p.conferir({ ...m.comando(), assinatura: ASSINATURA_ERRADA });
   const recusasArq = path.join(raiz, 'auditoria-recusas.jsonl');
   // O arquivo das recusas girou sozinho; o dos aceitos continua com o aceito.
   assert.ok(fs.existsSync(`${recusasArq}.1`));
@@ -828,14 +890,14 @@ test('a auditoria não contém o texto da mensagem', (t) => {
   m.porteiro.concluir(aceito, { ok: true });
   m.porteiro.conferir(m.comando({ tipo: 'abrir', chave: null, dados: JSON.stringify({ projeto: 'moises', pedido: MSG_SECRETA }) }));
   m.porteiro.conferir(m.comando({ dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO, extra: 1 }) }));
-  m.porteiro.conferir({ ...m.comando(), assinatura: 'A'.repeat(43) });
+  m.porteiro.conferir({ ...m.comando(), assinatura: ASSINATURA_ERRADA });
   const bruto = fs.readFileSync(m.audArq, 'utf8') + fs.readFileSync(m.recusasArq, 'utf8');
   assert.equal(m.linhas().length, 3);
   assert.equal(m.recusas().length, 2);
   assert.ok(!bruto.includes(MSG_SECRETA));
   assert.ok(!bruto.includes('"dados"'));
   assert.ok(!bruto.includes(aceito.assinatura));
-  for (const a of m.aps) assert.ok(!bruto.includes(a.chave.toString('hex')));
+  for (const a of m.aps) assert.ok(!bruto.includes(a.publica));
   for (const l of m.linhas()) {
     assert.deepEqual(Object.keys(l), ['em', 'id', 'tipo', 'sessao', 'quem', 'decisao', 'motivo', 'resultado']);
   }

@@ -6,7 +6,7 @@
 // assinatura; S11: teto por minuto só para assinatura válida; R1: data no futuro também gasta o teto).
 import fs from 'node:fs';
 import path from 'node:path';
-import { assinaturaConfere } from './assinatura.js';
+import { assinaturaConfere, chavePublica } from './assinatura.js';
 import { pastaSoDoDono } from './auditoria.js';
 
 export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
@@ -28,9 +28,9 @@ const RE_KID = /^[a-z0-9]{6}$/;
 const RE_ID = /^c_[0-9a-f]{16}$/;
 const RE_TIPO = /^[A-Za-z_]{1,20}$/; // só a forma; se é um verbo conhecido, decide a etapa `verbo`
 const RE_SESSAO = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const RE_ASSINATURA = /^[A-Za-z0-9_-]{43}$/;
-// Arquivo de chaves.
-const RE_CHAVE_HEX = /^[0-9a-f]{64}$/;
+// ECDSA SHA-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15, achado A1). A assinatura HMAC
+// do código do aparelho (43 caracteres) não vale mais e cai aqui, no formato.
+const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
 // Dados por verbo.
 const RE_PROJETO = /^[A-Za-z0-9._-]{1,60}$/; // mesma regra dos nomes de projetos.json
 const RE_CONTA = /^[a-z0-9]{1,20}$/; // mesma regra do prefixo da chave de sessão
@@ -51,7 +51,7 @@ const ERROS = {
   formato: 'Comando em formato inválido.',
   verbo: 'Tipo de comando desconhecido.',
   aparelho: 'Este aparelho não está autorizado neste computador.',
-  assinatura: 'A assinatura do comando não confere com o código deste aparelho.',
+  assinatura: 'A assinatura do comando não confere com a chave deste aparelho.',
   expirado: 'O comando demorou mais de 2 minutos para chegar e não foi executado.',
   relogio: 'O relógio do aparelho está adiantado; acerte a hora e tente de novo.',
   repetido: 'Este comando já tinha sido recebido.',
@@ -68,7 +68,10 @@ const desligado = () => process.env.MOISES_COMANDOS === '0';
 
 // ---------- Chaveiro ----------
 
-// Arquivo JSON { "<kid>": { "rotulo", "chave": "<64 hex>", "criadaEm" } }, com permissão 600.
+// Arquivo JSON { "<kid>": { "rotulo", "publica": "<pública ECDSA P-256 raw em base64url>", "criadaEm" } },
+// com permissão 600, gravado por `configurar-comandos.js --autorizar` depois de o dono conferir a
+// impressão digital (achado A1). Entrada com chave pública fora do formato ou fora da curva, e a do
+// formato antigo (chave HMAC do código do aparelho), é ignorada.
 // É relido quando muda (inode, tamanho, mtime, ctime ou modo): revogar um aparelho vale sem reiniciar.
 export class Chaveiro {
   constructor({ arquivo }) {
@@ -81,7 +84,7 @@ export class Chaveiro {
     if (typeof kid !== 'string') return null;
     this.#recarregar();
     const e = this.chaves.get(kid);
-    return e ? { chave: Buffer.from(e.chave), rotulo: e.rotulo } : null;
+    return e ? { chave: e.chave, rotulo: e.rotulo } : null;
   }
 
   aparelhos() {
@@ -116,10 +119,19 @@ export class Chaveiro {
         return aviso('não é um JSON válido');
       }
       if (!objetoSimples(json)) return aviso('não é um objeto JSON');
+      let ignorados = 0;
       for (const [kid, e] of Object.entries(json)) {
-        if (!RE_KID.test(kid) || !objetoSimples(e) || typeof e.chave !== 'string' || !RE_CHAVE_HEX.test(e.chave)) continue;
+        // KeyObject imutável: quem chama obter() não consegue trocar a chave guardada.
+        const chave = RE_KID.test(kid) && objetoSimples(e) ? chavePublica(e.publica) : null;
+        if (!chave) {
+          ignorados++;
+          continue;
+        }
         const rotulo = typeof e.rotulo === 'string' ? Array.from(e.rotulo).slice(0, MAX_ROTULO).join('') : '';
-        this.chaves.set(kid, { chave: Buffer.from(e.chave, 'hex'), rotulo });
+        this.chaves.set(kid, { chave, rotulo });
+      }
+      if (ignorados) {
+        console.error(`chaveiro: ${ignorados} aparelho(s) do arquivo de chaves ignorado(s) (formato antigo ou chave pública inválida); autorize de novo com configurar-comandos.js --pedidos e --autorizar.`);
       }
     } catch (err) {
       this.marca = null;

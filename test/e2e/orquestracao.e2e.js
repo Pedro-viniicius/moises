@@ -44,8 +44,7 @@ Object.assign(process.env, {
   MOISES_IDEIAS_TETO_DIA: '0',
 });
 
-const { derivarChave, assinarComando, hashVisto } = await import('../../public/assinatura.js');
-const coletorAssinatura = await import('../../collector/assinatura.js');
+const { gerarAparelho, assinarComando, hashVisto } = await import('../../public/assinatura.js');
 const { gerarHashSenha } = await import('../../api/_lib.js');
 const { rodar } = await import('../../collector/index.js');
 
@@ -91,12 +90,11 @@ async function main() {
   const senha = hex(12);
   const token = crypto.randomBytes(32).toString('base64url');
 
-  // Chave deste "aparelho": o código nasce aqui, a derivada vai para um arquivo 600 e o código fica só na memória.
-  const codigo = coletorAssinatura.gerarCodigo();
-  const noColetor = coletorAssinatura.derivarChave(codigo);
+  // Este "aparelho" gera o par ECDSA P-256 como o navegador (a privada não extraível fica só na memória) e a
+  // chave pública vai para o arquivo 600 no formato que `configurar-comandos.js --autorizar` grava.
+  const aparelho = await gerarAparelho();
   const chavesArq = path.join(tmp, 'chaves-comandos.json');
-  fs.writeFileSync(chavesArq, JSON.stringify({ [noColetor.kid]: { rotulo: 'e2e', chave: noColetor.chave.toString('hex'), criadaEm: new Date().toISOString() } }), { mode: 0o600 });
-  const aparelho = await derivarChave(codigo);
+  fs.writeFileSync(chavesArq, JSON.stringify({ [aparelho.kid]: { rotulo: 'e2e', publica: aparelho.publica, criadaEm: new Date().toISOString() } }), { mode: 0o600 });
   const projetosArq = path.join(tmp, 'projetos.json');
   fs.writeFileSync(projetosArq, JSON.stringify({ 'moises-sandbox': SANDBOX }));
 

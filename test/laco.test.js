@@ -15,6 +15,8 @@ import { Auditoria } from '../collector/auditoria.js';
 import { Chaveiro, Porteiro } from '../collector/comandos.js';
 import { MODELOS, ESFORCOS, MODOS } from '../collector/orquestrador.js';
 import * as col from '../collector/assinatura.js';
+import * as nav from '../public/assinatura.js';
+import { aparelho as novoAparelho, assinarCom, gravarChaves as gravarChavesNoFormato } from './fixtures/aparelho.js';
 
 // O ambiente de quem roda os testes não pode desligar o canal nem esconder texto por acidente.
 delete process.env.MOISES_COMANDOS;
@@ -58,20 +60,16 @@ const novaPasta = () => {
   fs.mkdirSync(d, { recursive: true });
   return d;
 };
-const assinar = (chave, c) => ({ ...c, assinatura: crypto.createHmac('sha256', chave).update(col.textoDoComando(c), 'utf8').digest('base64url') });
+const assinar = (privada, c) => assinarCom(privada, c);
 const novoId = () => `c_${crypto.randomBytes(8).toString('hex')}`;
 const lerLinhas = (arq) => (fs.existsSync(arq) ? fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 
-function gravarChaves(arquivo, aparelhos) {
-  const json = {};
-  for (const a of aparelhos) json[a.kid] = { rotulo: a.rotulo, chave: a.chave.toString('hex'), criadaEm: new Date().toISOString() };
-  fs.writeFileSync(arquivo, JSON.stringify(json), { mode: 0o600 });
-}
+const gravarChaves = (arquivo, aparelhos) => gravarChavesNoFormato(arquivo, aparelhos);
 
 // Porteiro de verdade (chaveiro, auditoria e vistos numa pasta própria) e um aparelho autorizado.
 function canal() {
   const d = novaPasta();
-  const ap = { kid: 'ab2cd3', rotulo: 'celular', chave: crypto.randomBytes(32) };
+  const ap = novoAparelho('ab2cd3', 'celular');
   const chavesArq = path.join(d, 'chaves-comandos.json');
   gravarChaves(chavesArq, [ap]);
   const estado = path.join(d, 'estado');
@@ -79,7 +77,7 @@ function canal() {
   const chaveiro = new Chaveiro({ arquivo: chavesArq });
   const porteiro = new Porteiro({ chaveiro, pastaEstado: estado, auditoria: new Auditoria({ arquivo: audArq }) });
   const comando = (campos = {}) =>
-    assinar(ap.chave, {
+    assinar(ap.privada, {
       v: 1, kid: ap.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(),
       dados: JSON.stringify({ texto: SEGREDO, visto: { projeto: 'p', nome: null } }), ...campos,
     });
@@ -181,7 +179,7 @@ test('tratarComandos recusa sem credencial e não executa', async () => {
   assert.deepEqual(execucoes, []);
   assert.deepEqual(acks, [
     { id: semAssinatura.id, estado: 'recusado', erro: 'Comando sem assinatura.', motivo: 'sem_credencial' },
-    { id: trocada.id, estado: 'recusado', erro: 'A assinatura do comando não confere com o código deste aparelho.', motivo: 'assinatura' },
+    { id: trocada.id, estado: 'recusado', erro: 'A assinatura do comando não confere com a chave deste aparelho.', motivo: 'assinatura' },
   ]);
   assert.deepEqual(m.linhas(), [], 'recusa não vai para o arquivo dos aceitos');
   assert.deepEqual(m.recusas().map((l) => [l.id, l.decisao, l.motivo]), [
@@ -272,7 +270,7 @@ test('comando sem tipo é recusado e não vira encerrar', async () => {
   const antigo = { id: novoId(), chave: SESSAO, criadoEm: Date.now(), idadeMs: 0 };
   // Assinado de verdade, mas sem tipo.
   const { v, kid, id, chave, criadoEm, dados } = m.comando({ tipo: 'encerrar' });
-  const assinadoSemTipo = assinar(m.ap.chave, { v, kid, id, chave, criadoEm, dados });
+  const assinadoSemTipo = assinar(m.ap.privada, { v, kid, id, chave, criadoEm, dados });
   assert.equal('tipo' in assinadoSemTipo, false);
   // Ids que não são texto: ignorados sem ack.
   const lixo = [null, 'x', 7, { id: 7, tipo: 'encerrar', chave: SESSAO }, { tipo: 'encerrar', chave: SESSAO }];
@@ -356,13 +354,16 @@ test('exceção na execução vira falhou com erro genérico', async (t) => {
 
 // ---------------------------------------------------------------- configurar-comandos
 
-// Pasta de configuração temporária com os três arquivos que o script não pode tocar.
+// Pasta de configuração temporária com os três arquivos que o script não pode tocar, e a pasta de
+// estado do coletor (onde ele grava os pedidos de pareamento que o servidor entrega).
 function configuracao() {
   const d = novaPasta();
   const conf = path.join(d, 'conf');
   const home = path.join(d, 'home');
+  const estado = path.join(d, 'estado');
   fs.mkdirSync(conf, { mode: 0o700 });
   fs.mkdirSync(home);
+  fs.mkdirSync(estado, { mode: 0o700 });
   const outros = { 'coletor.env': 'MOISES_URL=https://falso.example\nMOISES_TOKEN=token-falso\n', 'vercel.env': 'SESSION_SECRET=falso\n', 'senha-painel.txt': 'senha-falsa\n' };
   const antigo = new Date('2026-01-02T03:04:05Z');
   for (const [nome, conteudo] of Object.entries(outros)) {
@@ -370,7 +371,7 @@ function configuracao() {
     fs.utimesSync(path.join(conf, nome), antigo, antigo);
   }
   const rodarScript = (...args) =>
-    spawnSync(process.execPath, [CONFIGURAR, ...args], { env: { PATH: process.env.PATH, HOME: home, MOISES_PASTA_CONF: conf }, encoding: 'utf8', timeout: 20_000 });
+    spawnSync(process.execPath, [CONFIGURAR, ...args], { env: { PATH: process.env.PATH, HOME: home, MOISES_PASTA_CONF: conf, MOISES_ESTADO: estado }, encoding: 'utf8', timeout: 20_000 });
   const outrosIntactos = () => {
     for (const [nome, conteudo] of Object.entries(outros)) {
       const arq = path.join(conf, nome);
@@ -380,120 +381,243 @@ function configuracao() {
   };
   const chavesArq = path.join(conf, 'chaves-comandos.json');
   const chaves = () => JSON.parse(fs.readFileSync(chavesArq, 'utf8'));
-  const codigoDe = (kid) => fs.readFileSync(path.join(conf, `codigo-${kid}.txt`), 'utf8').trim();
-  return { conf, home, rodarScript, outrosIntactos, chavesArq, chaves, codigoDe };
+  const pedidosArq = path.join(estado, 'aparelhos-pedidos.json');
+  // Grava os pedidos como o coletor grava (lista de { kid, publica, rotulo, criadoEm }), mas sem conferir.
+  const pedidos = (lista) => fs.writeFileSync(pedidosArq, JSON.stringify(lista), { mode: 0o600 });
+  return { conf, home, estado, rodarScript, outrosIntactos, chavesArq, chaves, pedidosArq, pedidos };
 }
 const modo = (arq) => fs.statSync(arq).mode & 0o777;
+const pedidoDe = (ap, criadoEm = Date.now()) => ({ kid: ap.kid, publica: ap.publica, rotulo: ap.rotulo, criadoEm });
 
-test('configurar-comandos grava chaves e código com permissão 600, não imprime o código e não toca nos outros arquivos', () => {
+// Dois aparelhos diferentes com o mesmo kid (24 bits): pelo paradoxo do aniversário, alguns milhares de
+// pares bastam (menos de 1 s). Calculado uma vez, quando um teste precisa.
+let colisao = null;
+function doisComOMesmoKid() {
+  if (colisao) return colisao;
+  const vistos = new Map();
+  for (;;) {
+    const a = novoAparelho(null, 'celular');
+    const b = vistos.get(a.kid);
+    if (b && b.publica !== a.publica) return (colisao = [b, { ...a, rotulo: 'intruso' }]);
+    vistos.set(a.kid, a);
+  }
+}
+
+test('configurar-comandos --pedidos lista kid, rótulo, impressão digital e horário, e nunca a chave pública', () => {
   const c = configuracao();
-  const r = c.rodarScript('celular do dono');
+  // Sem arquivo de pedidos: diz que não há e explica como pedir.
+  const vazio = c.rodarScript('--pedidos');
+  assert.equal(vazio.status, 0, vazio.stderr);
+  assert.match(vazio.stdout, /Nenhum pedido de autorização/);
+  const a = novoAparelho(null, 'celular do dono');
+  const b = novoAparelho(null, 'tablet');
+  const mentiroso = { ...pedidoDe(novoAparelho(null, 'mentiroso')), kid: a.kid.split('').reverse().join('') };
+  const vencido = novoAparelho(null, 'vencido');
+  const comControle = novoAparelho(null, `rtl${String.fromCodePoint(0x202e)}falso`);
+  c.pedidos([pedidoDe(a), pedidoDe(b), mentiroso, pedidoDe(vencido, Date.now() - 2 * 3_600_000), pedidoDe(comControle), { lixo: true }, 'texto']);
+  const r = c.rodarScript('--pedidos');
   assert.equal(r.status, 0, r.stderr);
-  const kids = Object.keys(c.chaves());
-  assert.equal(kids.length, 1);
-  const [kid] = kids;
-  assert.match(kid, /^[a-z0-9]{6}$/);
-  const codigoArq = path.join(c.conf, `codigo-${kid}.txt`);
-  assert.equal(modo(c.chavesArq), 0o600);
-  assert.equal(modo(codigoArq), 0o600);
-  const codigo = c.codigoDe(kid);
-  assert.match(codigo, /^[a-z0-9]{6}(-[a-z0-9]{4}){4}$/);
-  // Só caminhos, o kid e a instrução; nunca o código, inteiro ou sem hífens, nem a chave.
+  for (const ap of [a, b]) {
+    const linha = r.stdout.split('\n').find((l) => l.includes(ap.kid));
+    assert.ok(linha, `linha do ${ap.rotulo}`);
+    assert.ok(linha.includes(ap.rotulo));
+    assert.ok(linha.includes(ap.impressao), 'a impressão digital é calculada aqui, da chave pública');
+    assert.match(linha, /\d{2}:\d{2}/, 'horário do pedido');
+  }
   const saida = r.stdout + r.stderr;
-  assert.ok(!saida.includes(codigo));
-  assert.ok(!saida.includes(col.normalizarCodigo(codigo)));
-  assert.ok(!saida.includes(col.normalizarCodigo(codigo).slice(6)));
-  assert.ok(!saida.includes(c.chaves()[kid].chave));
-  assert.match(r.stdout, new RegExp(kid));
-  assert.ok(r.stdout.includes(codigoArq));
-  assert.ok(r.stdout.includes(c.chavesArq));
-  assert.match(r.stdout, /digite o código no aparelho e apague o arquivo/i);
-  assert.deepEqual(c.chaves()[kid].rotulo, 'celular do dono');
-  assert.ok(!Number.isNaN(Date.parse(c.chaves()[kid].criadaEm)));
+  for (const ap of [a, b, vencido, comControle]) assert.ok(!saida.includes(ap.publica), 'nunca a chave pública');
+  // Pedido incoerente (kid que não é o da chave), vencido ou com caractere de controle não aparece.
+  assert.ok(!saida.includes('mentiroso'));
+  assert.ok(!saida.includes(mentiroso.kid));
+  assert.ok(!saida.includes(vencido.kid));
+  assert.ok(!saida.includes(comControle.kid));
+  // Depois de autorizado, o pedido some da lista.
+  assert.equal(c.rodarScript('--autorizar', a.kid, a.impressao).status, 0);
+  const depois = c.rodarScript('--pedidos');
+  assert.ok(!depois.stdout.includes(a.kid));
+  assert.ok(depois.stdout.includes(b.kid));
+  c.outrosIntactos();
+  assert.deepEqual(fs.readdirSync(c.home), [], 'nada fora da pasta indicada');
+});
+
+test('configurar-comandos --autorizar grava a chave pública conferida com permissão 600, sem imprimi-la e sem tocar nos outros arquivos', async () => {
+  const c = configuracao();
+  // O aparelho é o do navegador (public/assinatura.js): privada não extraível, pública raw em base64url.
+  const doNavegador = await nav.gerarAparelho();
+  const pedido = { kid: doNavegador.kid, publica: doNavegador.publica, rotulo: 'celular do dono', criadoEm: Date.now() };
+  c.pedidos([pedido]);
+  // A impressão digital vale sem hífens e em maiúsculas.
+  const r = c.rodarScript('--autorizar', doNavegador.kid, doNavegador.impressao.replaceAll('-', '').toUpperCase());
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(Object.keys(c.chaves()), [doNavegador.kid]);
+  const entrada = c.chaves()[doNavegador.kid];
+  assert.deepEqual(Object.keys(entrada).sort(), ['criadaEm', 'publica', 'rotulo']);
+  assert.equal(entrada.publica, doNavegador.publica);
+  assert.equal(entrada.rotulo, 'celular do dono');
+  assert.ok(!Number.isNaN(Date.parse(entrada.criadaEm)));
+  assert.equal(modo(c.chavesArq), 0o600);
+  // Só kid, rótulo, impressão digital (e a instrução de conferir); nunca a chave pública.
+  const saida = r.stdout + r.stderr;
+  assert.ok(!saida.includes(doNavegador.publica));
+  assert.ok(r.stdout.includes(doNavegador.kid));
+  assert.ok(r.stdout.includes(doNavegador.impressao));
+  assert.ok(r.stdout.includes('celular do dono'));
+  assert.match(r.stdout, /--revogar/);
+  // Não existe mais código do aparelho em arquivo.
+  assert.deepEqual(fs.readdirSync(c.conf).filter((n) => n.startsWith('codigo-')), []);
   // projetos.json nasce vazio, e não é recriado se já existe.
   const projetosArq = path.join(c.conf, 'projetos.json');
   assert.deepEqual(JSON.parse(fs.readFileSync(projetosArq, 'utf8')), {});
-  fs.writeFileSync(projetosArq, '{"moises":"/tmp"}');
-  assert.equal(c.rodarScript('tablet').status, 0);
-  assert.deepEqual(JSON.parse(fs.readFileSync(projetosArq, 'utf8')), { moises: '/tmp' });
   c.outrosIntactos();
   assert.deepEqual(fs.readdirSync(c.home), [], 'nada fora da pasta indicada');
-  // O formato gravado é o que o chaveiro do coletor lê.
-  assert.equal(new Chaveiro({ arquivo: c.chavesArq }).aparelhos().length, 2);
-  // Sem rótulo, ou com rótulo inválido: nada é gravado.
-  const d = configuracao();
-  for (const args of [[], [''], ['a'.repeat(41)], ['linha\nquebrada'], ['--desconhecida']]) {
-    const ruim = d.rodarScript(...args);
-    assert.equal(ruim.status, 1, `args ${JSON.stringify(args)}`);
-  }
-  assert.equal(fs.existsSync(d.chavesArq), false);
-  d.outrosIntactos();
-});
-
-test('a chave gravada é a derivada do código gravado', () => {
-  const c = configuracao();
-  assert.equal(c.rodarScript('celular').status, 0);
-  const [[kid, entrada]] = Object.entries(c.chaves());
-  const derivada = col.derivarChave(c.codigoDe(kid));
-  assert.equal(derivada.kid, kid);
-  assert.equal(entrada.chave, derivada.chave.toString('hex'));
-  // E um comando assinado com o código passa no porteiro do coletor, lendo o arquivo gravado.
-  const estado = path.join(c.conf, '..', 'estado');
-  const porteiro = new Porteiro({ chaveiro: new Chaveiro({ arquivo: c.chavesArq }), pastaEstado: estado, auditoria: new Auditoria({ arquivo: path.join(estado, 'a.jsonl') }) });
-  const cmd = assinar(derivada.chave, { v: 1, kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: JSON.stringify({ visto: { projeto: 'p', nome: null } }) });
+  // O formato gravado é o que o chaveiro do coletor lê, e um comando assinado no navegador passa no porteiro.
+  const chaveiro = new Chaveiro({ arquivo: c.chavesArq });
+  assert.deepEqual(chaveiro.aparelhos(), [{ kid: doNavegador.kid, rotulo: 'celular do dono' }]);
+  const porteiro = new Porteiro({ chaveiro, pastaEstado: path.join(c.estado, 'p'), auditoria: new Auditoria({ arquivo: path.join(c.estado, 'p', 'a.jsonl') }) });
+  const cmd = await nav.assinarComando(doNavegador, { tipo: 'interromper', chave: SESSAO, dados: { visto: { projeto: 'p', nome: null } } });
   assert.equal(porteiro.conferir(cmd).ok, true);
+  // Autorizar de novo o mesmo aparelho não muda nada.
+  fs.writeFileSync(projetosArq, '{"moises":"/tmp"}');
+  const antes = fs.readFileSync(c.chavesArq, 'utf8');
+  // E também em grupos separados por espaço (vários argumentos).
+  const de_novo = c.rodarScript('--autorizar', doNavegador.kid, ...doNavegador.impressao.split('-'));
+  assert.equal(de_novo.status, 0, de_novo.stderr);
+  assert.match(de_novo.stdout, /já está autorizado/);
+  assert.equal(fs.readFileSync(c.chavesArq, 'utf8'), antes);
+  assert.deepEqual(JSON.parse(fs.readFileSync(projetosArq, 'utf8')), { moises: '/tmp' });
 });
 
-test('segundo aparelho não apaga o primeiro', () => {
+test('configurar-comandos --autorizar não autoriza sem a impressão digital certa, nem kid sem pedido, pedido incoerente ou vencido', () => {
   const c = configuracao();
-  assert.equal(c.rodarScript('celular').status, 0);
-  const primeiro = c.chaves();
-  assert.equal(c.rodarScript('tablet').status, 0);
-  const ambos = c.chaves();
-  assert.equal(Object.keys(ambos).length, 2);
-  const [kid1] = Object.keys(primeiro);
-  assert.deepEqual(ambos[kid1], primeiro[kid1]);
-  const kid2 = Object.keys(ambos).find((k) => k !== kid1);
-  assert.equal(ambos[kid2].rotulo, 'tablet');
-  assert.ok(fs.existsSync(path.join(c.conf, `codigo-${kid1}.txt`)));
-  assert.ok(fs.existsSync(path.join(c.conf, `codigo-${kid2}.txt`)));
-  // --listar mostra kid e rótulo, e nada da chave nem do código.
-  const lista = c.rodarScript('--listar');
-  assert.equal(lista.status, 0, lista.stderr);
-  for (const k of [kid1, kid2]) {
-    assert.match(lista.stdout, new RegExp(`${k}.*${ambos[k].rotulo}`));
-    assert.ok(!lista.stdout.includes(ambos[k].chave));
-    assert.ok(!lista.stdout.includes(c.codigoDe(k)));
+  const a = novoAparelho(null, 'celular');
+  const foraDaCurva = Buffer.from(a.publica, 'base64url');
+  foraDaCurva[64] ^= 1;
+  const publicaRuim = foraDaCurva.toString('base64url');
+  const hashRuim = crypto.createHash('sha256').update(foraDaCurva).digest('hex');
+  const kidRuim = hashRuim.slice(0, 6);
+  const outro = novoAparelho(null, 'outro');
+  const vencido = novoAparelho(null, 'vencido');
+  const [x, y] = doisComOMesmoKid();
+  c.pedidos([
+    { kid: kidRuim, publica: publicaRuim, rotulo: 'fora da curva', criadoEm: Date.now() },
+    { ...pedidoDe(outro), kid: a.kid }, // kid de um aparelho, chave de outro
+    { ...pedidoDe(a), publica: a.publica.slice(0, 86) }, // chave pública curta
+    pedidoDe(vencido, Date.now() - 3_600_001),
+    pedidoDe(x),
+    pedidoDe(y), // mesmo kid, outra chave
+  ]);
+  const casos = [
+    [[], 'sem argumento'],
+    [['celular'], 'rótulo solto (uso antigo, que gerava código)'],
+    [['--desconhecida'], 'opção desconhecida'],
+    [['--autorizar'], 'sem kid'],
+    [['--autorizar', '../coletor.env'], 'kid fora do formato'],
+    [['--autorizar', 'zzzzzz', x.impressao], 'kid sem pedido'],
+    [['--autorizar', kidRuim, hashRuim.slice(0, 16)], 'ponto fora da curva'],
+    [['--autorizar', a.kid, a.impressao], 'kid de outra chave e chave curta'],
+    [['--autorizar', vencido.kid, vencido.impressao], 'pedido vencido'],
+    [['--autorizar', x.kid], 'sem a impressão digital'],
+    [['--autorizar', x.kid, '0000-0000-0000-0000'], 'impressão digital errada'],
+    [['--autorizar', x.kid, x.impressao.slice(0, -1)], 'impressão digital curta'],
+    [['--autorizar', x.kid, `${x.impressao}0`], 'impressão digital longa'],
+    [['--autorizar', x.kid, x.impressao.replace(/[0-9a-f]$/, 'g')], 'impressão digital fora do hexadecimal'],
+  ];
+  for (const [args, nome] of casos) {
+    const r = c.rodarScript(...args);
+    assert.equal(r.status, 1, nome);
+    const saida = r.stdout + r.stderr;
+    for (const ap of [a, x, y, outro, vencido]) assert.ok(!saida.includes(ap.publica), `${nome}: não imprime chave`);
   }
+  assert.equal(fs.existsSync(c.chavesArq), false, 'nada foi autorizado');
+  // Sem a impressão, ou com outra, a recusa explica o que fazer.
+  for (const extra of [[], ['0000-0000-0000-0000']]) {
+    const r = c.rodarScript('--autorizar', x.kid, ...extra);
+    assert.ok(r.stderr.includes('Confira a impressão digital mostrada no aparelho e passe-a: --autorizar <kid> <impressão>'), r.stderr);
+  }
+  // Pedido trocado entre --pedidos e --autorizar, com o mesmo kid: o dono viu (e digita) a impressão de x,
+  // mas o servidor passou a entregar y. Nada é gravado.
+  c.pedidos([pedidoDe(x)]);
+  assert.ok(c.rodarScript('--pedidos').stdout.includes(x.impressao));
+  c.pedidos([pedidoDe(y)]);
+  const trocado = c.rodarScript('--autorizar', x.kid, x.impressao);
+  assert.equal(trocado.status, 1);
+  assert.match(trocado.stderr, /não é a do pedido/);
+  assert.equal(fs.existsSync(c.chavesArq), false, 'o pedido trocado não foi gravado');
+  // Com os dois pedidos do mesmo kid, a impressão digital escolhe o certo.
+  c.pedidos([pedidoDe(x), pedidoDe(y)]);
+  assert.equal(c.rodarScript('--autorizar', x.kid, x.impressao).status, 0);
+  assert.deepEqual(Object.keys(c.chaves()), [x.kid]);
+  assert.equal(c.chaves()[x.kid].publica, x.publica);
+  // Aparelho já autorizado com o mesmo kid e outra chave: não substitui (o dono revoga antes).
+  c.pedidos([pedidoDe(y)]);
+  const r = c.rodarScript('--autorizar', y.kid, y.impressao);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--revogar/);
+  assert.equal(c.chaves()[x.kid].publica, x.publica);
   // Arquivo de chaves corrompido: o script não sobrescreve (perderia os aparelhos).
   fs.writeFileSync(c.chavesArq, '{quebrado', { mode: 0o600 });
-  const r = c.rodarScript('outro');
-  assert.equal(r.status, 1);
+  c.pedidos([pedidoDe(outro)]);
+  assert.equal(c.rodarScript('--autorizar', outro.kid, outro.impressao).status, 1);
   assert.equal(fs.readFileSync(c.chavesArq, 'utf8'), '{quebrado');
-  assert.equal(fs.readdirSync(c.conf).filter((n) => n.startsWith('codigo-')).length, 2);
   c.outrosIntactos();
 });
 
-test('--revogar tira o aparelho', () => {
+test('segundo aparelho não apaga o primeiro, e o rótulo repetido gera aviso', () => {
   const c = configuracao();
-  assert.equal(c.rodarScript('celular').status, 0);
-  assert.equal(c.rodarScript('tablet').status, 0);
-  const [kid1, kid2] = Object.keys(c.chaves());
+  const a = novoAparelho(null, 'celular');
+  const b = novoAparelho(null, 'celular');
+  c.pedidos([pedidoDe(a), pedidoDe(b)]);
+  const r1 = c.rodarScript('--autorizar', a.kid, a.impressao);
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.ok(!/mesmo rótulo/.test(r1.stdout + r1.stderr));
+  const primeiro = c.chaves();
+  const r2 = c.rodarScript('--autorizar', b.kid, b.impressao);
+  assert.equal(r2.status, 0, r2.stderr);
+  // Avisa do rótulo repetido, citando o kid do outro, para o dono revogar o antigo se for o mesmo aparelho.
+  assert.match(r2.stdout + r2.stderr, new RegExp(`mesmo rótulo[\\s\\S]*${a.kid}`));
+  const ambos = c.chaves();
+  assert.deepEqual(Object.keys(ambos).sort(), [a.kid, b.kid].sort());
+  assert.deepEqual(ambos[a.kid], primeiro[a.kid]);
+  // --listar mostra kid, rótulo e impressão digital, e nada da chave pública.
+  const lista = c.rodarScript('--listar');
+  assert.equal(lista.status, 0, lista.stderr);
+  for (const ap of [a, b]) {
+    assert.match(lista.stdout, new RegExp(`${ap.kid}.*${ap.rotulo}.*${ap.impressao}`));
+    assert.ok(!lista.stdout.includes(ap.publica));
+  }
+  c.outrosIntactos();
+});
+
+test('--revogar tira o aparelho, e --listar aponta o aparelho do formato antigo', () => {
+  const c = configuracao();
+  const a = novoAparelho(null, 'celular');
+  const b = novoAparelho(null, 'tablet');
+  c.pedidos([pedidoDe(a), pedidoDe(b)]);
+  assert.equal(c.rodarScript('--autorizar', a.kid, a.impressao).status, 0);
+  assert.equal(c.rodarScript('--autorizar', b.kid, b.impressao).status, 0);
   const chaveiro = new Chaveiro({ arquivo: c.chavesArq });
   assert.equal(chaveiro.aparelhos().length, 2);
-  const r = c.rodarScript('--revogar', kid1);
+  const r = c.rodarScript('--revogar', a.kid);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(Object.keys(c.chaves()), [kid2]);
-  assert.equal(fs.existsSync(path.join(c.conf, `codigo-${kid1}.txt`)), false);
-  assert.ok(fs.existsSync(path.join(c.conf, `codigo-${kid2}.txt`)));
+  assert.deepEqual(Object.keys(c.chaves()), [b.kid]);
   assert.equal(modo(c.chavesArq), 0o600);
   // Vale sem reiniciar o coletor: o chaveiro relê o arquivo.
-  assert.deepEqual(chaveiro.aparelhos().map((a) => a.kid), [kid2]);
+  assert.deepEqual(chaveiro.aparelhos().map((x) => x.kid), [b.kid]);
   // kid desconhecido ou fora do formato: erro, nada muda.
-  assert.equal(c.rodarScript('--revogar', kid1).status, 1);
+  assert.equal(c.rodarScript('--revogar', a.kid).status, 1);
   assert.equal(c.rodarScript('--revogar', '../coletor.env').status, 1);
   assert.equal(c.rodarScript('--revogar').status, 1);
-  assert.deepEqual(Object.keys(c.chaves()), [kid2]);
+  assert.deepEqual(Object.keys(c.chaves()), [b.kid]);
+  // Entrada do formato antigo (chave do código do aparelho): --listar avisa que não vale mais, sem a chave.
+  const json = c.chaves();
+  json.ab2cd3 = { rotulo: 'velho', chave: 'f'.repeat(64), criadaEm: new Date().toISOString() };
+  fs.writeFileSync(c.chavesArq, JSON.stringify(json), { mode: 0o600 });
+  const lista = c.rodarScript('--listar');
+  assert.equal(lista.status, 0, lista.stderr);
+  assert.match(lista.stdout, /ab2cd3.*velho.*formato antigo/);
+  assert.ok(!lista.stdout.includes('f'.repeat(64)));
+  assert.equal(c.rodarScript('--revogar', 'ab2cd3').status, 0);
+  assert.deepEqual(Object.keys(c.chaves()), [b.kid]);
   c.outrosIntactos();
 });
 
@@ -502,7 +626,7 @@ test('--revogar tira o aparelho', () => {
 // Painel falso: guarda cada corpo recebido e entrega os comandos da fila. Serve os arquivos do painel
 // de `publica` (por padrão, o public/ do repositório); `trocados` muda o que é servido (null: 404).
 // POST cujo corpo satisfaz `estado.segurar` fica sem resposta e o corpo vai para `segurados`.
-async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA } = {}) {
+async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA, aparelhosPedidos = null } = {}) {
   const pedidos = [];
   const fila = [];
   const gets = [];
@@ -535,7 +659,10 @@ async function painelFalso(t, token, { sempre = () => [], publica = PUBLICA } = 
         return;
       }
       pedidos.push(JSON.parse(corpo));
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ comandos: [...fila.splice(0), ...sempre()], painelVistoEm: Date.now() }));
+      const resposta = { comandos: [...fila.splice(0), ...sempre()], painelVistoEm: Date.now() };
+      // Pedidos de pareamento de aparelho, como o ingest entrega ao coletor com protocolo 2 (tarefa 15).
+      if (aparelhosPedidos) resposta.aparelhosPedidos = aparelhosPedidos();
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(resposta));
     });
   });
   await new Promise((r) => servidor.listen(0, '127.0.0.1', r));
@@ -565,7 +692,7 @@ function ambiente() {
   fs.mkdirSync(proj);
   const projetosArq = path.join(d, 'projetos.json');
   fs.writeFileSync(projetosArq, JSON.stringify({ 'projeto-x': proj }));
-  const ap = { kid: 'ab2cd3', rotulo: 'celular', chave: crypto.randomBytes(32) };
+  const ap = novoAparelho('ab2cd3', 'celular');
   const chavesArq = path.join(d, 'chaves-comandos.json');
   gravarChaves(chavesArq, [ap]);
   return { d, dirClaude, proj, projetosArq, ap, chavesArq, pastaEstado: path.join(d, 'estado'), token: crypto.randomBytes(32).toString('base64url') };
@@ -617,11 +744,11 @@ test('rodar com um servidor local falso: manda o retrato com orquestracao e trat
   assert.equal(painel.pedidos[0].protocolo, 2);
 
   // Um abrir assinado e um comando sem assinatura chegam juntos.
-  const abrir = assinar(amb.ap.chave, {
+  const abrir = assinar(amb.ap.privada, {
     v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'abrir', chave: null, criadoEm: Date.now(),
     dados: JSON.stringify({ projeto: 'projeto-x', pedido: SEGREDO, nome: 'sessao de teste' }),
   });
-  const { assinatura, ...semAssinatura } = assinar(amb.ap.chave, { ...abrir, id: novoId() });
+  const { assinatura, ...semAssinatura } = assinar(amb.ap.privada, { ...abrir, id: novoId() });
   painel.fila.push({ ...abrir, idadeMs: 10 }, semAssinatura);
 
   const feito = await ate(() => painel.acks().find((a) => a.id === abrir.id && a.estado !== 'recebido'), 'resultado do abrir');
@@ -691,6 +818,48 @@ test('rodar com soPrefixo: o retrato só leva sessões cujo nome começa pelo pr
   t.after(() => outro.parar());
   const r2 = await ate(() => painel2.retratos()[0], 'primeiro retrato sem prefixo');
   assert.deepEqual(r2.sessoes.map((x) => x.nome).sort(), ['moises-teste-a', 'outra coisa']);
+});
+
+test('rodar grava em aparelhos-pedidos.json (600) só os pedidos de pareamento coerentes, sem confiar no servidor', async (t) => {
+  const amb = ambiente();
+  const validos = Array.from({ length: 6 }, (_, i) => novoAparelho(null, `aparelho ${i}`));
+  const foraDaCurva = Buffer.from(validos[1].publica, 'base64url');
+  foraDaCurva[64] ^= 1;
+  const pedido = (ap, extra = {}) => ({ kid: ap.kid, publica: ap.publica, rotulo: ap.rotulo, criadoEm: Date.now(), ...extra });
+  const estado = { lista: [
+    pedido(validos[0]),
+    pedido(validos[1], { kid: validos[2].kid }), // kid de outra chave
+    pedido(validos[1], { publica: foraDaCurva.toString('base64url'), kid: crypto.createHash('sha256').update(foraDaCurva).digest('hex').slice(0, 6) }),
+    pedido(validos[1], { rotulo: 'linha\nquebrada' }),
+    pedido(validos[1], { rotulo: 'a'.repeat(41) }),
+    pedido(validos[1], { criadoEm: 'ontem' }),
+    null,
+    'texto',
+    pedido(validos[1], { impressao: '0000-0000-0000-0000', extra: 'x' }), // só os quatro campos ficam
+    ...validos.slice(2).map((ap) => pedido(ap)), // 4 válidos a mais: passa do teto de 5
+  ] };
+  const painel = await painelFalso(t, amb.token, { aparelhosPedidos: () => estado.lista });
+  const { logs } = await iniciarColetor(t, amb, painel);
+  const arq = path.join(amb.pastaEstado, 'aparelhos-pedidos.json');
+  const gravado = await ate(() => fs.existsSync(arq) && JSON.parse(fs.readFileSync(arq, 'utf8')), 'arquivo de pedidos');
+  assert.equal(fs.statSync(arq).mode & 0o777, 0o600);
+  assert.deepEqual(gravado.map((p) => p.kid), validos.slice(0, 5).map((ap) => ap.kid));
+  for (const p of gravado) assert.deepEqual(Object.keys(p).sort(), ['criadoEm', 'kid', 'publica', 'rotulo']);
+  assert.equal(gravado[1].rotulo, 'aparelho 1');
+  // Nada dos pedidos (chave pública, rótulo) vai para o log.
+  const tudo = logs.join('\n');
+  for (const ap of validos) assert.ok(!tudo.includes(ap.publica) && !tudo.includes(ap.rotulo), tudo);
+  // Pedidos que somem no servidor somem do arquivo; resposta sem a lista (servidor antigo) não mexe nele.
+  estado.lista = [];
+  await ate(() => JSON.parse(fs.readFileSync(arq, 'utf8')).length === 0, 'arquivo de pedidos vazio');
+  estado.lista = [pedido(validos[0])];
+  await ate(() => JSON.parse(fs.readFileSync(arq, 'utf8')).length === 1, 'pedido de novo');
+  estado.lista = undefined;
+  const n = painel.pedidos.length;
+  await ate(() => painel.pedidos.length >= n + 2, 'mais dois ciclos');
+  assert.equal(JSON.parse(fs.readFileSync(arq, 'utf8')).length, 1);
+  // Os pedidos não autorizam nada: o chaveiro continua só com o aparelho do arquivo de chaves.
+  assert.deepEqual(painel.retratos().at(-1).orquestracao.aparelhos, [{ kid: 'ab2cd3', rotulo: 'celular' }]);
 });
 
 test('rodar: um painel que devolve comandos em toda resposta não faz o laço girar sem pausa', async (t) => {
@@ -772,7 +941,7 @@ test('rodar com o painel publicado diferente de public/: comandos recusados com 
   const primeiro = await ate(() => painel.retratos()[0], 'primeiro retrato');
   assert.deepEqual([primeiro.orquestracao.ativa, primeiro.orquestracao.motivo], [false, 'painel_alterado']);
   const visto = JSON.stringify({ visto: { projeto: 'p', nome: null } });
-  const cmd1 = assinar(amb.ap.chave, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
+  const cmd1 = assinar(amb.ap.privada, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
   painel.fila.push({ ...cmd1, idadeMs: 5 });
   const recusa = await ate(() => painel.acks().find((a) => a.id === cmd1.id), 'recusa do comando');
   assert.deepEqual(recusa, { id: cmd1.id, estado: 'recusado', erro: PAINEL_ALTERADO, motivo: 'painel_alterado' });
@@ -782,7 +951,7 @@ test('rodar com o painel publicado diferente de public/: comandos recusados com 
   // O painel volta a ser o mesmo: na próxima conferência os comandos religam.
   painel.trocados.clear();
   await ate(() => painel.retratos().at(-1)?.orquestracao.ativa === true, 'orquestração religada');
-  const cmd2 = assinar(amb.ap.chave, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
+  const cmd2 = assinar(amb.ap.privada, { v: 1, kid: amb.ap.kid, id: novoId(), tipo: 'interromper', chave: SESSAO, criadoEm: Date.now(), dados: visto });
   painel.fila.push({ ...cmd2, idadeMs: 5 });
   const recebido = await ate(() => painel.acks().find((a) => a.id === cmd2.id), 'ack do comando');
   assert.equal(recebido.estado, 'recebido');
@@ -987,7 +1156,7 @@ test('MOISES_COMANDOS=0 e MOISES_SUBIR_TEXTO=0 escritos no coletor.env valem; o 
   const r2 = await ate(() => painel2.retratos()[0], 'retrato do segundo processo');
   assert.deepEqual([r2.orquestracao.ativa, r2.orquestracao.motivo], [true, null]);
   assert.match(p2.saida.texto, /comandos: ligados; texto: não sobe/);
-  const abrir = assinar(amb2.ap.chave, {
+  const abrir = assinar(amb2.ap.privada, {
     v: 1, kid: amb2.ap.kid, id: novoId(), tipo: 'abrir', chave: null, criadoEm: Date.now(),
     dados: JSON.stringify({ projeto: 'projeto-x', pedido: 'permissao:echo COMANDO-SECRETO', nome: 'sem texto' }),
   });

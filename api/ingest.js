@@ -8,6 +8,7 @@ import {
   chegadaDoComando,
   esquecerConteudo,
   expirarSeVencido,
+  pedidosDeAparelho,
   K,
   RE_CHAVE,
   MAX_PENDENTES,
@@ -36,9 +37,17 @@ export default rota(['POST'], async (req, res) => {
   if (!tokenColetorValido(req)) return json(res, 401, { erro: 'Token inválido.' });
   const { retrato, acks, protocolo } = await lerCorpo(req);
   const agora = Date.now();
-  const [, cmdsArr, painelVistoEm] = await pipeline([['SET', K.recebidoEm, String(agora)], ['HGETALL', K.cmds], ['GET', K.painelVistoEm]]);
+  const [, cmdsArr, painelVistoEm, pedidosArr] = await pipeline([
+    ['SET', K.recebidoEm, String(agora)],
+    ['HGETALL', K.cmds],
+    ['GET', K.painelVistoEm],
+    ['HGETALL', K.aparelhosPedidos],
+  ]);
   const cmds = new Map(hashParaObjetos(cmdsArr).map((c) => [c.id, c]));
   const muda = [];
+  // Pedidos de pareamento de aparelho (tarefa 15): os vencidos saem; os válidos vão ao coletor novo.
+  const pedidos = pedidosDeAparelho(pedidosArr, agora);
+  for (const kid of pedidos.vencidos) muda.push(['HDEL', K.aparelhosPedidos, kid]);
   if (retrato && typeof retrato === 'object' && Array.isArray(retrato.sessoes)) muda.push(['SET', K.retrato, JSON.stringify(retrato), 'EX', VALIDADE_RETRATO_S]);
 
   for (const a of Array.isArray(acks) ? acks : []) {
@@ -82,7 +91,9 @@ export default rota(['POST'], async (req, res) => {
   }
   await pipeline(muda);
   // Para o coletor antigo, nada: os pendentes ficam guardados até expirar ou até o coletor novo buscar.
-  if (protocolo !== PROTOCOLO_COLETOR) pendentes.length = 0;
+  if (protocolo !== PROTOCOLO_COLETOR) {
+    return json(res, 200, { comandos: [], painelVistoEm: painelVistoEm ? Number(painelVistoEm) : null });
+  }
   const comandos = pendentes
     .sort((a, b) => chegadaDoComando(a) - chegadaDoComando(b))
     .slice(0, MAX_PENDENTES)
@@ -90,5 +101,9 @@ export default rota(['POST'], async (req, res) => {
       const { v, kid, id, tipo, chave, criadoEm, dados, assinatura } = c;
       return { v, kid, id, tipo, chave, criadoEm, dados, assinatura, idadeMs: agora - chegadaDoComando(c) };
     });
-  json(res, 200, { comandos, painelVistoEm: painelVistoEm ? Number(painelVistoEm) : null });
+  // O coletor confere cada pedido de novo antes de gravá-lo: o servidor não é confiável.
+  const aparelhosPedidos = pedidos.validos
+    .sort((a, b) => a.criadoEm - b.criadoEm)
+    .map(({ kid, publica, rotulo, criadoEm }) => ({ kid, publica, rotulo, criadoEm }));
+  json(res, 200, { comandos, painelVistoEm: painelVistoEm ? Number(painelVistoEm) : null, aparelhosPedidos });
 });

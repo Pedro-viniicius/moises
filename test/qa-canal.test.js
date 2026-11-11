@@ -17,6 +17,7 @@ import { Auditoria } from '../collector/auditoria.js';
 import { Chaveiro, Porteiro, JANELA_MS, FOLGA_FUTURO_MS } from '../collector/comandos.js';
 import * as col from '../collector/assinatura.js';
 import * as nav from '../public/assinatura.js';
+import { aparelho as novoAparelho, assinarCom, gravarChaves as gravarChavesNoFormato } from './fixtures/aparelho.js';
 
 // O ambiente de quem roda os testes não pode desligar o canal nem esconder texto por acidente.
 delete process.env.MOISES_COMANDOS;
@@ -33,10 +34,10 @@ const SESSAO = 'principal:0123abcd-4567-89ab-cdef-0123456789ab';
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const T0 = 1_794_387_000_000;
 
-// A derivação custa 210.000 iterações: um código e as duas chaves dele, uma vez só.
-const codigo = col.gerarCodigo();
-const doNavegador = await nav.derivarChave(codigo);
-const doColetor = col.derivarChave(codigo);
+// Rodada 2 (A1): sem código do aparelho. Um aparelho do navegador (par ECDSA P-256 de public/assinatura.js,
+// privada não extraível) e um do Node (para assinar fora do navegador), os dois autorizados no arquivo de chaves.
+const doNavegador = await nav.gerarAparelho();
+const doColetor = novoAparelho(null, 'celular');
 
 let casos = 0;
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -55,19 +56,19 @@ const novaPasta = () => {
   return d;
 };
 const novoId = () => `c_${crypto.randomBytes(8).toString('hex')}`;
-const assinar = (chave, c) => ({ ...c, assinatura: crypto.createHmac('sha256', chave).update(col.textoDoComando(c), 'utf8').digest('base64url') });
+const assinar = (privada, c) => assinarCom(privada, c);
 const lerLinhas = (arq) => (fs.existsSync(arq) ? fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 const processosCom = (trecho) => spawnSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).stdout.split('\n').filter((l) => l.includes(trecho) && !l.includes('ps -eo'));
 
-function gravarChaves(arquivo, kid, chave) {
-  fs.writeFileSync(arquivo, JSON.stringify({ [kid]: { rotulo: 'celular', chave: chave.toString('hex'), criadaEm: new Date().toISOString() } }), { mode: 0o600 });
+function gravarChaves(arquivo) {
+  gravarChavesNoFormato(arquivo, [doColetor, { ...doNavegador, rotulo: 'celular' }]);
 }
 
 // Porteiro de verdade com relógio injetado e a chave derivada do mesmo código do navegador.
 function porteiroComRelogio(extra = {}) {
   const d = novaPasta();
   const chavesArq = path.join(d, 'chaves-comandos.json');
-  gravarChaves(chavesArq, doColetor.kid, doColetor.chave);
+  gravarChaves(chavesArq);
   const estado = path.join(d, 'estado');
   const relogio = { agora: T0 };
   const audArq = path.join(estado, 'auditoria.jsonl');
@@ -79,7 +80,7 @@ function porteiroComRelogio(extra = {}) {
     ...extra,
   });
   const comando = (campos = {}) =>
-    assinar(doColetor.chave, { v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: relogio.agora, dados: JSON.stringify({ texto: 'oi', visto: { projeto: 'p', nome: null } }), ...campos });
+    assinar(doColetor.privada, { v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: relogio.agora, dados: JSON.stringify({ texto: 'oi', visto: { projeto: 'p', nome: null } }), ...campos });
   // Rodada 2 (achado S21): recusas ficam em auditoria-recusas.jsonl; as duas juntas são a trilha completa.
   const recusasArq = path.join(estado, 'auditoria-recusas.jsonl');
   const linhas = () => [...lerLinhas(audArq), ...(fs.existsSync(recusasArq) ? lerLinhas(recusasArq) : [])];
@@ -118,13 +119,13 @@ test('CA2: comando assinado no navegador (WebCrypto) passa no porteiro para cada
     const r = m.porteiro.conferir(cmd);
     assert.equal(r.ok, true, `${tipo}: ${r.motivo}`);
     assert.deepEqual(JSON.parse(JSON.stringify(r.dados)), JSON.parse(JSON.stringify(dados)), `${tipo}: os dados que o porteiro entrega são os que o navegador assinou`);
-    assert.equal(r.quem, `${doColetor.kid} (celular)`);
+    assert.equal(r.quem, `${doNavegador.kid} (celular)`);
   }
 });
 
 test('CA2: assinatura do navegador não vale para outro código, nem com um byte de dados trocado', async () => {
   const m = porteiroComRelogio();
-  const outro = await nav.derivarChave(col.gerarCodigo());
+  const outro = await nav.gerarAparelho();
   const dados = { texto: 'oi', visto: { projeto: 'p', nome: null } };
   const deOutroCodigo = await nav.assinarComando({ kid: doNavegador.kid, chave: outro.chave }, { tipo: 'mensagem', chave: SESSAO, dados }, T0);
   assert.equal(motivo(m.porteiro.conferir(deOutroCodigo)), 'assinatura');
@@ -176,10 +177,10 @@ test('relógio do celular ATRASADO: a recusa manda acertar o relógio, em vez de
 
 test('CA2: toda recusa gera ack recusado com motivo e nenhuma chega ao orquestrador', async () => {
   const m = porteiroComRelogio();
-  const intruso = crypto.randomBytes(32);
+  const intruso = novoAparelho().privada;
   const dadosOk = JSON.stringify({ texto: 'oi', visto: { projeto: 'p', nome: null } });
   const base = { v: 1, kid: doColetor.kid, id: null, tipo: 'mensagem', chave: SESSAO, criadoEm: T0, dados: dadosOk };
-  const novo = (campos, chave = doColetor.chave) => assinar(chave, { ...base, id: novoId(), ...campos });
+  const novo = (campos, chave = doColetor.privada) => assinar(chave, { ...base, id: novoId(), ...campos });
   const { assinatura, ...semAssinatura } = novo({});
   const repetido = novo({});
   const comandos = [
@@ -260,7 +261,7 @@ function ambiente() {
   const projetosArq = path.join(d, 'projetos.json');
   fs.writeFileSync(projetosArq, JSON.stringify({ 'projeto-x': proj }));
   const chavesArq = path.join(d, 'chaves-comandos.json');
-  gravarChaves(chavesArq, doColetor.kid, doColetor.chave);
+  gravarChaves(chavesArq);
   return { d, dirClaude, projetosArq, chavesArq, registro: path.join(d, 'registro.json'), pastaEstado: path.join(d, 'estado'), token: crypto.randomBytes(32).toString('base64url') };
 }
 
@@ -288,7 +289,7 @@ async function iniciar(t, amb, painel, extra = {}) {
 // Manda um comando assinado pela chave do coletor (mesma derivação do navegador) e espera o ack final.
 function remetente(painel) {
   return async (tipo, chave, dados, campos = {}) => {
-    const cmd = assinar(doColetor.chave, { v: 1, kid: doColetor.kid, id: novoId(), tipo, chave, criadoEm: Date.now(), dados: JSON.stringify(dados), ...campos });
+    const cmd = assinar(doColetor.privada, { v: 1, kid: doColetor.kid, id: novoId(), tipo, chave, criadoEm: Date.now(), dados: JSON.stringify(dados), ...campos });
     painel.fila.push({ ...cmd, idadeMs: 5 });
     const final = await ate(() => painel.acks().find((a) => a.id === cmd.id && a.estado !== 'recebido'), `resultado de ${tipo}`);
     return { cmd, final };
@@ -307,9 +308,9 @@ test('foco 1: comando válido repetido por quem controla o Redis, depois de enxu
   assert.equal(final.estado, 'feito', JSON.stringify(final));
   assert.equal(entradasDoFilho(amb).split(PEDIDO).length - 1, 1);
 
-  // Enxurrada: 300 comandos com formato de verdade e assinatura qualquer.
+  // Enxurrada: 300 comandos com formato de verdade e assinatura qualquer (Rodada 2 (A1): 64 bytes, como a ECDSA).
   for (let i = 0; i < 300; i++) {
-    painel1.fila.push({ v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(), dados: '{}', assinatura: crypto.randomBytes(32).toString('base64url'), idadeMs: 1 });
+    painel1.fila.push({ v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(), dados: '{}', assinatura: crypto.randomBytes(64).toString('base64url'), idadeMs: 1 });
   }
   await ate(() => painel1.acks().filter((a) => a.estado === 'recusado' && a.motivo === 'assinatura').length >= 300, '300 recusas por assinatura', 20_000);
   // O mesmo comando, de novo, na mesma janela de validade.
@@ -381,8 +382,8 @@ test('CA3: todo arquivo que o coletor grava na pasta de estado (auditoria, visto
   const enviar = remetente(painel);
   const { final } = await enviar('abrir', null, { projeto: 'projeto-x', pedido: 'olá', nome: 'qa-modos' });
   assert.equal(final.estado, 'feito', JSON.stringify(final));
-  // Uma recusa também deixa linha na auditoria.
-  painel.fila.push({ v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(), dados: '{}', assinatura: crypto.randomBytes(32).toString('base64url'), idadeMs: 1 });
+  // Uma recusa também deixa linha na auditoria (Rodada 2 (A1): assinatura de 64 bytes, como a ECDSA).
+  painel.fila.push({ v: 1, kid: doColetor.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: Date.now(), dados: '{}', assinatura: crypto.randomBytes(64).toString('base64url'), idadeMs: 1 });
   await ate(() => painel.acks().some((a) => a.estado === 'recusado'), 'recusa');
   await c.parar();
   const arquivos = fs.readdirSync(amb.pastaEstado).filter((n) => !n.startsWith('ideias'));

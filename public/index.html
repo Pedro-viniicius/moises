@@ -72,15 +72,15 @@
 
     <section class="aparelho" aria-labelledby="aparelho-titulo">
       <h2 id="aparelho-titulo">Este aparelho</h2>
-      <p id="aparelho-texto">Este aparelho ainda não tem código.</p>
+      <p id="aparelho-texto">Este aparelho ainda não está autorizado a mandar comandos.</p>
       <p class="meta" id="aparelho-sair" hidden>Sair do painel também esquece este aparelho.</p>
       <div class="botoes" id="aparelho-botoes">
-        <button type="button" class="btn" id="aparelho-informar">Informar código</button>
-        <button type="button" class="btn btn-leve" id="aparelho-trocar" hidden>Trocar código</button>
+        <button type="button" class="btn" id="aparelho-autorizar">Autorizar este aparelho</button>
+        <button type="button" class="btn btn-leve" id="aparelho-instrucoes" hidden>Ver como autorizar</button>
         <button type="button" class="btn btn-leve" id="aparelho-esquecer" hidden>Esquecer este aparelho</button>
       </div>
       <div class="confirmar" id="aparelho-confirmar" hidden>
-        <p>Este aparelho vai deixar de mandar comandos até você digitar o código de novo.</p>
+        <p>Este aparelho vai apagar a chave dele e deixar de mandar comandos. Para voltar, será preciso autorizá-lo de novo no computador.</p>
         <div class="botoes">
           <button type="button" class="btn btn-perigo" id="aparelho-esquecer-sim">Esquecer este aparelho</button>
           <button type="button" class="btn" id="aparelho-esquecer-nao">Cancelar</button>
@@ -180,22 +180,35 @@
     </section>
   </dialog>
 
-  <dialog id="dlg-codigo" class="dialogo" aria-labelledby="codigo-titulo" aria-describedby="codigo-texto">
+  <dialog id="dlg-aparelho" class="dialogo" aria-labelledby="autorizar-titulo" aria-describedby="autorizar-texto">
     <div class="dialogo-cab">
-      <h2 id="codigo-titulo">Código do aparelho</h2>
+      <h2 id="autorizar-titulo" tabindex="-1">Autorizar este aparelho</h2>
+      <button type="button" class="btn btn-leve" id="autorizar-fechar">Fechar</button>
     </div>
-    <p id="codigo-texto">Este aparelho ainda não pode mandar comandos ao seu computador. Digite o código que o computador gerou para ele. O código não fica guardado: só uma chave que não pode ser copiada permanece neste aparelho.</p>
-    <div class="campo-grupo">
-      <label for="codigo">Código</label>
-      <input class="campo" id="codigo" type="password" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-describedby="codigo-ajuda codigo-erro">
-      <button type="button" class="btn btn-leve" id="codigo-mostrar" aria-pressed="false" aria-controls="codigo">Mostrar código</button>
-      <p class="meta" id="codigo-ajuda">22 letras e números, como xxxxxx-xxxx-xxxx-xxxx-xxxx. Hífens e espaços são ignorados.</p>
-      <p class="campo-erro" id="codigo-erro" role="alert"></p>
-    </div>
-    <div class="botoes">
-      <button type="button" class="btn" id="codigo-cancelar">Cancelar</button>
-      <button type="button" class="btn btn-primario" id="codigo-guardar">Guardar neste aparelho</button>
-    </div>
+
+    <section id="autorizar-pedir">
+      <p id="autorizar-texto">Este aparelho ainda não pode mandar comandos ao seu computador. Ele vai criar uma chave própria, que não pode ser copiada nem sai daqui, e pedir autorização ao computador. Nada secreto é digitado nesta página.</p>
+      <div class="campo-grupo">
+        <label for="autorizar-rotulo">Nome deste aparelho</label>
+        <input class="campo" id="autorizar-rotulo" type="text" maxlength="40" autocomplete="off" spellcheck="false" aria-describedby="autorizar-rotulo-ajuda autorizar-erro">
+        <p class="meta" id="autorizar-rotulo-ajuda">Aparece no computador na hora de autorizar. Por exemplo: celular do Moisés.</p>
+        <p class="campo-erro" id="autorizar-erro" role="alert"></p>
+      </div>
+      <div class="botoes">
+        <button type="button" class="btn btn-primario" id="autorizar-pedir-btn">Pedir autorização</button>
+      </div>
+    </section>
+
+    <section id="autorizar-aguardando" hidden>
+      <p>Impressão digital deste aparelho:</p>
+      <p class="impressao num" id="autorizar-impressao"></p>
+      <p id="autorizar-instrucao"></p>
+      <pre class="entrada autorizar-comando" id="autorizar-comando" tabindex="0" aria-label="Comando para autorizar este aparelho"></pre>
+      <p class="acao-estado" id="autorizar-status" role="status"></p>
+      <div class="botoes">
+        <button type="button" class="btn btn-leve" id="autorizar-de-novo">Pedir de novo</button>
+      </div>
+    </section>
   </dialog>
 
   <script type="module" src="/app.js"></script>

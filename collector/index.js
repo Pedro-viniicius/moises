@@ -11,10 +11,11 @@ import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Coletor, nomeConta } from './sessoes.js';
 import { Ideias } from './ideias.js';
-import { Auditoria } from './auditoria.js';
+import { Auditoria, pastaSoDoDono } from './auditoria.js';
 import { Chaveiro, Porteiro, TIPOS } from './comandos.js';
 import { Orquestrador, MODELOS, ESFORCOS, MODOS, FERRAMENTAS_PADRAO } from './orquestrador.js';
 import { redigir } from './redigir.js';
+import { pedidoDeAparelho } from './assinatura.js';
 
 const PROTOCOLO = 2; // anunciado em todo envio: o servidor só entrega comandos a quem confere assinatura
 const REENVIO_MS = 5 * 60_000; // manda o retrato mesmo sem mudança, como sinal de vida
@@ -23,6 +24,10 @@ const CICLO_MINIMO_MS = 200; // piso entre o início de dois ciclos, mesmo com o
 const MAX_RESPOSTA = 2_000_000; // 20 comandos de até 8.000 caracteres, com o escape do JSON
 const MAX_COMANDOS_POR_RESPOSTA = 20; // o resto, se vier, o servidor entrega de novo
 const ENVIO_FINAL_MS = 5_000; // parar(): tempo para mandar as últimas confirmações
+// Pedidos de pareamento de aparelho que o servidor entrega (tarefa 15): o dono os confere e autoriza com
+// `configurar-comandos.js --pedidos` e `--autorizar`. O servidor guarda no máximo 5.
+const ARQ_PEDIDOS_APARELHOS = 'aparelhos-pedidos.json';
+const MAX_PEDIDOS_APARELHOS = 5;
 const ESTADOS_OCUPADOS = ['trabalhando', 'esperando_permissao'];
 // Integridade do painel publicado (S15): os arquivos que montam e assinam comandos no aparelho.
 const ARQUIVOS_PAINEL = ['index.html', 'app.js', 'assinatura.js', 'cofre.js', 'style.css'];
@@ -233,6 +238,44 @@ function assinatura(r) {
   return crypto.createHash('sha1').update(JSON.stringify([r.totalDia, base, r.orquestracao])).digest('hex');
 }
 
+// Texto de aparelhos-pedidos.json: só os pedidos de pareamento que passam em pedidoDeAparelho (kid da
+// própria chave pública, ponto na curva, rótulo visível), no máximo 5. O servidor não é confiável; o
+// script confere tudo de novo antes de autorizar.
+function textoDosPedidos(lista) {
+  const validos = [];
+  for (const p of Array.isArray(lista) ? lista : []) {
+    const ok = pedidoDeAparelho(p);
+    if (ok) validos.push(ok);
+    if (validos.length >= MAX_PEDIDOS_APARELHOS) break;
+  }
+  return { validos: validos.length, texto: `${JSON.stringify(validos)}\n` };
+}
+
+// Grava o texto em <pastaEstado>/aparelhos-pedidos.json (600, por temporário e rename). Lança só com o
+// código do erro de disco (nada do conteúdo).
+function gravarPedidosAparelhos(pastaEstado, texto) {
+  const arquivo = path.join(pastaEstado, ARQ_PEDIDOS_APARELHOS);
+  const tmp = `${arquivo}.${process.pid}.tmp`;
+  let fd = null;
+  try {
+    pastaSoDoDono(pastaEstado);
+    fd = fs.openSync(tmp, 'w', 0o600);
+    fs.fchmodSync(fd, 0o600);
+    fs.writeSync(fd, texto);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, arquivo);
+  } catch (err) {
+    try {
+      if (fd !== null) fs.closeSync(fd);
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* nada a limpar */
+    }
+    throw new ErroDoPainel(`não foi possível gravar os pedidos de pareamento (${err?.code || 'erro'})`);
+  }
+}
+
 async function enviar({ url, token }, corpo, sinal) {
   const r = await fetch(new URL('/api/ingest', url), {
     method: 'POST',
@@ -343,6 +386,8 @@ export async function rodar({
   let falhasSeguidas = 0;
   let despertar = null;
   let acordarLogo = false;
+  let pedidosGravados = null; // texto do último aparelhos-pedidos.json gravado (só regrava se mudar)
+  let falhaPedidos = null; // última falha ao gravá-lo, para não repetir a mesma linha no log
 
   const acordar = () => {
     if (despertar) despertar();
@@ -395,6 +440,24 @@ export async function rodar({
     }
   }
 
+  // Resposta sem a lista (servidor antigo) não mexe no arquivo; lista igual à última gravada não regrava.
+  // Falha de disco vai para o log uma vez (tenta de novo a cada ciclo). Nada do conteúdo vai para o log.
+  function repassarPedidos(lista) {
+    if (!Array.isArray(lista)) return;
+    const { validos, texto } = textoDosPedidos(lista);
+    if (texto === pedidosGravados) return;
+    try {
+      gravarPedidosAparelhos(pastaEstado, texto);
+      pedidosGravados = texto;
+      falhaPedidos = null;
+      if (validos) info(`[coletor] ${validos} pedido(s) de autorização de aparelho; confira com configurar-comandos.js --pedidos`);
+    } catch (err) {
+      const msg = descreverErro(err);
+      if (msg !== falhaPedidos) erro(`[coletor] ${msg}`);
+      falhaPedidos = msg;
+    }
+  }
+
   async function ciclo(inicio) {
     const retrato = montarRetrato();
     ocupadas = contarOcupadas(retrato);
@@ -416,6 +479,7 @@ export async function rodar({
     falhasSeguidas = 0;
     painelVistoEm = Number.isFinite(resp?.painelVistoEm) ? resp.painelVistoEm : null;
     if (parado) return;
+    repassarPedidos(resp?.aparelhosPedidos);
     const bloqueio = painelAlterado && !porteiroDesligado ? PAINEL_ALTERADO : null;
     const novas = await tratarComandos({ comandos: resp?.comandos, porteiro, orquestrador, acks, aoTerminar: acordar, bloqueio, log });
     for (const p of novas) {

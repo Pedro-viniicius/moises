@@ -12,6 +12,8 @@ import {
   K,
   TIPOS_CMD,
   RE_CHAVE,
+  RE_KID,
+  RE_ASSINATURA,
   MAX_PENDENTES,
 } from './_lib.js';
 
@@ -49,13 +51,13 @@ function campoInvalido(c) {
   const extra = Object.keys(c).find((k) => !CAMPOS.includes(k));
   if (extra !== undefined) return 'campo desconhecido';
   if (c.v !== 1) return 'v';
-  if (typeof c.kid !== 'string' || !/^[a-z0-9]{6}$/.test(c.kid)) return 'kid';
+  if (typeof c.kid !== 'string' || !RE_KID.test(c.kid)) return 'kid';
   if (typeof c.id !== 'string' || !/^c_[0-9a-f]{16}$/.test(c.id)) return 'id';
   if (!TIPOS_CMD.includes(c.tipo)) return 'tipo';
   if (c.tipo === 'abrir' ? c.chave !== null : typeof c.chave !== 'string' || !RE_CHAVE.test(c.chave)) return 'chave';
   if (!Number.isSafeInteger(c.criadoEm)) return 'criadoEm';
   if (!dadosValidos(c.dados)) return 'dados';
-  if (typeof c.assinatura !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(c.assinatura)) return 'assinatura';
+  if (typeof c.assinatura !== 'string' || !RE_ASSINATURA.test(c.assinatura)) return 'assinatura';
   return null;
 }
 

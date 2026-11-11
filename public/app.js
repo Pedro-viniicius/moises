@@ -1,7 +1,7 @@
 // Painel do Moisés: sessões, histórico e comandos assinados neste aparelho (módulo ES, sem dependências).
 // Regras da tela em docs/orquestracao/SPEC-interface.md. A CSP exige Trusted Types: nenhum innerHTML, todo
 // texto vindo do coletor entra por textContent. Nada de texto de sessão em console.*.
-import { normalizarCodigo, derivarChave, assinarComando, hashVisto } from './assinatura.js';
+import { gerarAparelho, impressaoDaPublica, assinarComando, hashVisto } from './assinatura.js';
 import { guardar, obter, esquecer } from './cofre.js';
 
 const TZ = 'America/Sao_Paulo';
@@ -16,24 +16,28 @@ const LIMITE_ANDAMENTO_MS = { pendente: 3 * 60_000, recebido: 11 * 60_000 };
 const MAX_TEXTO = 6000; // mensagem e pedido inicial (contrato)
 const CONTADOR_DESDE = 5000;
 const MAX_DADOS = 8000; // tamanho da string `dados` aceito pelo servidor
-const RE_CODIGO = /^[abcdefghjkmnpqrstuvwxyz23456789]{22}$/;
+const MAX_ROTULO = 40; // nome do aparelho no pedido de autorização (o servidor confere de novo)
+const INVISIVEL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 const RE_NOME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const TITULO = 'Moisés · Sessões do Claude Code';
 
 /* ---------- Textos ---------- */
 
 const TEXTOS = {
-  semCodigo: 'Comando não enviado: falta o código do aparelho.',
-  codigoPrimeira: 'Este aparelho ainda não pode mandar comandos ao seu computador. Digite o código que o computador gerou para ele. O código não fica guardado: só uma chave que não pode ser copiada permanece neste aparelho.',
-  codigoTroca: 'Digite o novo código. Ele substitui o que está guardado neste aparelho.',
-  codigoMalFormado: 'O código tem 22 letras e números. Confira e tente de novo.',
-  semIndexedDB: 'Este navegador não deixou guardar o código. Saia do modo privado e tente de novo.',
+  semAutorizacao: 'Comando não enviado: este aparelho ainda não foi autorizado no computador.',
+  rotuloInvalido: 'Escreva um nome de 1 a 40 caracteres para este aparelho, sem quebra de linha.',
+  semIndexedDB: 'Este navegador não deixou guardar a chave do aparelho. Saia do modo privado e tente de novo.',
   semCripto: 'Este navegador não oferece a criptografia que os comandos exigem. Abra o painel pelo endereço https e tente de novo.',
-  codigoGuardado: 'Código guardado neste aparelho.',
-  aparelhoEsquecido: 'Aparelho esquecido.',
+  erroChave: 'Não foi possível criar a chave deste aparelho. Tente de novo.',
+  pedidosDemais: 'Há pedidos de autorização demais esperando o computador. Autorize os que são seus ou espere uma hora e tente de novo.',
+  pedidoEnviado: 'Pedido enviado. Ele chega ao computador no próximo ciclo do coletor e vale por 1 hora.',
+  aguardandoAutorizacao: 'Aguardando autorização no computador.',
+  aparelhoAutorizado: 'Aparelho autorizado. Já pode mandar comandos.',
+  aparelhoEsquecido: (kid) => 'Aparelho esquecido. Para tirar a autorização dele no computador, rode node scripts/configurar-comandos.js --revogar ' + kid + '.',
   desligadoSemDados: 'Comandos desligados: o coletor ainda não enviou dados.',
   desligadoForaDoAr: (h) => 'Comandos desligados: o coletor está fora do ar desde ' + h + '.',
   desligadoOrquestracao: 'Comandos desligados: a orquestração está desligada neste computador.',
+  desligadoSemAparelho: 'Comandos desligados: nenhum aparelho está autorizado neste computador. Use "Autorizar este aparelho", no fim da página.',
   desligadoCripto: 'Comandos desligados: este navegador não oferece a criptografia que os comandos exigem (abra o painel por https).',
   bannerSemDados: 'O coletor ainda não enviou dados. Sem ele não dá para mandar comandos.',
   bannerForaDoAr: (h) => 'O coletor está fora do ar desde ' + h + '. Você vê o último estado conhecido, mas não pode mandar comandos.',
@@ -72,6 +76,8 @@ const TEXTOS = {
   confRetomar: 'Retomar esta conversa no computador?',
   foraDoArPedido: ' O coletor está fora do ar. O pedido vale por 2 minutos e depois expira.',
   expirado: 'O coletor não buscou o pedido em 2 minutos, então ele expirou e não foi executado. Tente de novo quando o coletor voltar.',
+  novaDesligada: 'A orquestração está desligada neste computador.',
+  novaSemAparelho: 'Nenhum aparelho está autorizado neste computador. Use "Autorizar este aparelho", no fim da página.',
   novaProjetosVazio: 'Nenhum projeto permitido neste computador. Adicione projetos ao arquivo projetos.json, em ~/.config/moises.',
   novaLimite: (n) => 'Limite de ' + n + ' sessões abertas pelo painel. Encerre uma para abrir outra.',
   novaFrase: (abertas, max) => 'O Claude vai trabalhar na pasta do projeto, neste modo, no seu computador. Ele roda isolado: sem seus plugins, MCP, skills e comandos de barra, só com as ferramentas básicas. Sessões abertas pelo painel: ' + abertas + ' de ' + max + '.',
@@ -131,14 +137,14 @@ const FRASES = {
 
 // Texto da recusa escolhido só pelo `motivo`, nunca procurando palavras no `erro`.
 const MOTIVOS = {
-  assinatura: 'o código deste aparelho não foi aceito pelo computador.',
-  aparelho: 'o código deste aparelho não foi aceito pelo computador.',
+  assinatura: 'a chave deste aparelho não foi aceita pelo computador.',
+  aparelho: 'este aparelho não está autorizado no computador (ou a autorização foi revogada).',
   relogio: 'o relógio deste aparelho está errado. Acerte a data e a hora (de preferência no automático) e tente de novo.',
   expirado: 'o pedido demorou mais de 2 minutos para chegar e não foi executado. Tente de novo.',
   repetido: 'este pedido já tinha sido recebido.',
   ritmo: 'pedidos demais em pouco tempo. Espere um minuto e tente de novo.',
   desligado: 'os comandos estão desligados neste computador.',
-  sem_chave: 'o computador não tem nenhum código de aparelho configurado.',
+  sem_chave: 'o computador não tem nenhum aparelho autorizado.',
   formato: 'o pedido veio em formato inválido.',
   verbo: 'este tipo de pedido não é aceito.',
   interno: 'erro interno do coletor. Tente de novo; se repetir, veja o log no computador.',
@@ -295,7 +301,7 @@ const estado = {
   cartoes: new Map(), // chave -> objeto do cartão
   pendentesLocais: new Map(), // id -> comando aceito pelo servidor que ainda não voltou em /api/estado
   textosEnviados: new Map(), // id -> texto da mensagem, para devolver à caixa se o comando não chegar
-  kid: null, // aparelho guardado neste navegador (só o identificador público)
+  aparelho: null, // { kid, impressao } do aparelho guardado neste navegador (só o que é público)
 };
 
 const criptoDisponivel = () => !!(window.isSecureContext && globalThis.crypto && globalThis.crypto.subtle);
@@ -312,6 +318,7 @@ function motivoBloqueio() {
   if (!d || !d.retrato) return TEXTOS.desligadoSemDados;
   if (coletorParado()) return TEXTOS.desligadoForaDoAr(hora(d.recebidoEm));
   const o = orquestracao();
+  if (o && o.ativa !== true && o.motivo === 'sem_chave') return TEXTOS.desligadoSemAparelho;
   if (!o || o.ativa !== true) return TEXTOS.desligadoOrquestracao;
   if (!criptoDisponivel()) return TEXTOS.desligadoCripto;
   return null;
@@ -362,7 +369,7 @@ async function enviarComando(tipo, sessao, dados = {}, { exibido = null } = {}) 
   const bloqueio = motivoBloqueio();
   if (bloqueio) return { ok: false, erro: bloqueio };
   const aparelho = await chaveDoAparelho();
-  if (!aparelho) return { ok: false, erro: TEXTOS.semCodigo };
+  if (!aparelho) return { ok: false, erro: TEXTOS.semAutorizacao };
 
   const corpo = { ...dados };
   let cmd;
@@ -411,7 +418,7 @@ function descreverComando(c) {
         passos: ['feito', 'Recusado', null],
         texto: f.recusado + razao,
         falha: true,
-        pedirCodigo: c.motivo === 'assinatura' || c.motivo === 'aparelho',
+        pedirAutorizacao: c.motivo === 'assinatura' || c.motivo === 'aparelho',
       };
     }
     case 'falhou':
@@ -441,11 +448,11 @@ function criarAndamento() {
   alerta.setAttribute('role', 'alert');
   const nota = el('p', 'meta');
   nota.hidden = true;
-  const codigo = botao('Digitar o código de novo', 'btn btn-leve');
-  codigo.hidden = true;
-  codigo.addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
-  raiz.append(passos, frase, alerta, nota, codigo);
-  return { raiz, passos, itens, frase, alerta, nota, codigo, marca: null };
+  const autorizar = botao('Autorizar este aparelho', 'btn btn-leve');
+  autorizar.hidden = true;
+  autorizar.addEventListener('click', () => abrirDialogoAparelho());
+  raiz.append(passos, frase, alerta, nota, autorizar);
+  return { raiz, passos, itens, frase, alerta, nota, autorizar, marca: null };
 }
 
 function atualizarAndamento(a, cmd, nota = null) {
@@ -454,7 +461,7 @@ function atualizarAndamento(a, cmd, nota = null) {
   a.passos.hidden = !d;
   a.nota.hidden = !d || !nota;
   if (d && nota) a.nota.textContent = nota;
-  a.codigo.hidden = !d || !d.pedirCodigo;
+  a.autorizar.hidden = !d || !d.pedirAutorizacao;
 
   const marca = d ? cmd.id + '|' + d.texto : null;
   if (marca === a.marca) return;
@@ -834,13 +841,13 @@ function criarBlocoPermissao(c, p) {
   respondido.hidden = true;
   const erro = el('p', 'acao-estado erro');
   erro.setAttribute('role', 'alert');
-  const codigo = botao('Digitar o código de novo', 'btn btn-leve');
-  codigo.hidden = true;
-  codigo.addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
-  raiz.append(faixa, botoes, respondido, erro, codigo);
+  const autorizar = botao('Autorizar este aparelho', 'btn btn-leve');
+  autorizar.hidden = true;
+  autorizar.addEventListener('click', () => abrirDialogoAparelho());
+  raiz.append(faixa, botoes, respondido, erro, autorizar);
 
   const b = {
-    raiz, titulo, pre, faixa, botoes, negar, aprovar: sensivel ? null : aprovar, respondido, erro, codigo,
+    raiz, titulo, pre, faixa, botoes, negar, aprovar: sensivel ? null : aprovar, respondido, erro, autorizar,
     pedido: p.pedido, ferramenta, completo, enviando: null, idCmd: null, erroTexto: null,
     assinatura: JSON.stringify([ferramenta, entrada, completo, p.sensivel === true]),
   };
@@ -887,12 +894,12 @@ function atualizarBlocoPermissao(c, b) {
   const cmd = b.idCmd ? todosComandos().find((x) => x.id === b.idCmd) : null;
   let respondido = false;
   let erro = b.erroTexto;
-  let pedirCodigo = false;
+  let pedirAutorizacao = false;
   if (cmd) {
     const d = descreverComando(cmd);
     if (d && d.falha) {
       erro = d.texto;
-      pedirCodigo = !!d.pedirCodigo;
+      pedirAutorizacao = !!d.pedirAutorizacao;
     } else {
       respondido = true;
     }
@@ -917,7 +924,7 @@ function atualizarBlocoPermissao(c, b) {
     b.aprovar.textContent = b.enviando === 'aprovar' ? 'Aprovando…' : 'Aprovar';
   }
   if (b.erro.textContent !== (erro || '')) b.erro.textContent = erro || '';
-  b.codigo.hidden = !pedirCodigo;
+  b.autorizar.hidden = !pedirAutorizacao;
 }
 
 async function responderPermissao(c, b, decisao) {
@@ -1346,7 +1353,8 @@ function motivoNovaSessao() {
   const d = estado.dados;
   if (!d || !d.retrato || coletorParado()) return { texto: motivoBloqueio() };
   const o = orquestracao();
-  if (!o || o.ativa !== true) return { orquestracaoDesligada: true };
+  if (o && o.ativa !== true && o.motivo === 'sem_chave') return { texto: TEXTOS.novaSemAparelho };
+  if (!o || o.ativa !== true) return { texto: TEXTOS.novaDesligada };
   if (!lista(o.projetos).length) return { texto: TEXTOS.novaProjetosVazio };
   if (Number.isFinite(o.maxSessoes) && Number.isFinite(o.abertas) && o.abertas >= o.maxSessoes) {
     return { texto: TEXTOS.novaLimite(o.maxSessoes) };
@@ -1360,17 +1368,8 @@ function renderNovaSessao() {
   const b = $('nova-sessao');
   b.disabled = !!m || nova.enviando;
   const p = $('nova-motivo');
-  if (m && m.orquestracaoDesligada) {
-    if (!p.dataset.desligada) {
-      p.dataset.desligada = '1';
-      p.replaceChildren('A orquestração está desligada neste computador. Rode ',
-        el('code', null, 'node scripts/configurar-comandos.js'), ' nele para ligar.');
-    }
-  } else {
-    delete p.dataset.desligada;
-    const texto = m ? m.texto : '';
-    if (p.textContent !== texto) p.textContent = texto;
-  }
+  const texto = m ? m.texto : '';
+  if (p.textContent !== texto) p.textContent = texto;
   atualizarAndamento(andamentoAbrir, comandoAbrir());
 }
 
@@ -1542,49 +1541,107 @@ $('dlg-nova').addEventListener('close', () => {
   if (!$('nova-sessao').disabled) $('nova-sessao').focus();
 });
 
-/* ---------- Código do aparelho ---------- */
+/* ---------- Autorizar este aparelho ---------- */
 
-let pedidoCodigo = null; // { promessa, resolver, deComando, origem }
-let derivando = false;
+// O aparelho gera um par ECDSA P-256 (a chave privada não extraível fica no IndexedDB) e pede autorização
+// mandando só a chave pública. O dono autoriza no computador, pelo terminal, conferindo a impressão digital que
+// aparece aqui (achado A1). Nada secreto é digitado nesta página.
 
-function abrirDialogoCodigo({ troca = false, deComando = false } = {}) {
-  if (pedidoCodigo) return pedidoCodigo.promessa;
-  let resolver;
-  const promessa = new Promise((r) => { resolver = r; });
-  pedidoCodigo = { promessa, resolver, deComando, origem: document.activeElement };
-  $('codigo-texto').textContent = troca ? TEXTOS.codigoTroca : TEXTOS.codigoPrimeira;
-  limparCampoCodigo();
-  $('dlg-codigo').showModal();
-  $('codigo').focus();
-  return promessa;
+let etapaAparelho = null; // 'pedir' | 'aguardando' enquanto o diálogo está aberto
+let origemAparelho = null; // controle que abriu o diálogo, para devolver o foco
+let pedindo = false;
+
+const rotuloValido = (r) => !!r && !INVISIVEL.test(r) && Array.from(r).length <= MAX_ROTULO;
+
+function aparelhoAutorizado(kid) {
+  const o = orquestracao();
+  return !!(kid && o && Array.isArray(o.aparelhos) && o.aparelhos.some((a) => a && a.kid === kid));
 }
 
-function limparCampoCodigo() {
-  const campo = $('codigo');
-  campo.value = '';
-  campo.type = 'password';
-  campo.removeAttribute('aria-invalid');
-  $('codigo-mostrar').setAttribute('aria-pressed', 'false');
-  $('codigo-erro').textContent = '';
+// Guarda em `estado` só o que é público do aparelho deste navegador e redesenha o rodapé se mudou.
+async function sincronizarAparelho(a) {
+  let novo = null;
+  if (a) {
+    try {
+      const id = await impressaoDaPublica(a.publica);
+      // Registro cujo kid não é o da própria chave pública conta como sem chave.
+      if (id.kid === a.kid) novo = { kid: a.kid, impressao: id.impressao };
+    } catch { /* registro estranho: conta como sem chave */ }
+  }
+  const antes = estado.aparelho;
+  estado.aparelho = novo;
+  if ((antes && antes.kid) !== (novo && novo.kid)) atualizarRodape();
+  return novo;
 }
 
-function fecharDialogoCodigo(resultado) {
-  const p = pedidoCodigo;
-  pedidoCodigo = null;
-  limparCampoCodigo();
-  if ($('dlg-codigo').open) $('dlg-codigo').close();
-  if (!p) return;
-  p.resolver(resultado);
-  if (p.origem && p.origem.isConnected && p.origem !== document.body) p.origem.focus();
+// Sem `etapa`: com chave ainda não autorizada, mostra a impressão digital e a instrução; senão, o pedido.
+function abrirDialogoAparelho(etapa = null) {
+  const dlg = $('dlg-aparelho');
+  if (dlg.open) return;
+  origemAparelho = document.activeElement;
+  const ap = estado.aparelho;
+  mostrarEtapaAparelho(etapa || (ap && !aparelhoAutorizado(ap.kid) ? 'aguardando' : 'pedir'));
+  dlg.showModal();
+  if (etapaAparelho === 'pedir') $('autorizar-rotulo').focus();
+  else $('autorizar-titulo').focus();
 }
 
-async function guardarCodigo() {
-  if (derivando || !pedidoCodigo) return;
-  const campo = $('codigo');
-  const erro = $('codigo-erro');
-  const normal = normalizarCodigo(campo.value);
-  if (!normal || !RE_CODIGO.test(normal)) {
-    erro.textContent = TEXTOS.codigoMalFormado;
+function mostrarEtapaAparelho(etapa) {
+  etapaAparelho = etapa;
+  $('autorizar-pedir').hidden = etapa !== 'pedir';
+  $('autorizar-aguardando').hidden = etapa !== 'aguardando';
+  $('dlg-aparelho').setAttribute('aria-describedby', etapa === 'pedir' ? 'autorizar-texto' : 'autorizar-instrucao');
+  $('autorizar-erro').textContent = '';
+  $('autorizar-rotulo').removeAttribute('aria-invalid');
+  if (etapa === 'aguardando') atualizarAguardando();
+}
+
+// Impressão digital em letras grandes, a instrução com os dois comandos e se o computador já autorizou.
+function atualizarAguardando() {
+  const ap = estado.aparelho;
+  if (!ap) return;
+  $('autorizar-impressao').textContent = ap.impressao;
+  // O comando de autorizar leva o kid e a impressão deste aparelho: o computador só grava a chave se a
+  // impressão for a do pedido que chegou lá (um pedido trocado no caminho não passa).
+  const instrucao = $('autorizar-instrucao');
+  if (instrucao.dataset.kid !== ap.kid) {
+    instrucao.dataset.kid = ap.kid;
+    instrucao.replaceChildren('No computador, rode ', el('code', null, 'node scripts/configurar-comandos.js --pedidos'),
+      ', confira se a impressão digital é esta e autorize com:');
+    $('autorizar-comando').textContent = 'node scripts/configurar-comandos.js --autorizar ' + ap.kid + ' ' + ap.impressao;
+  }
+  const texto = aparelhoAutorizado(ap.kid) ? TEXTOS.aparelhoAutorizado : TEXTOS.aguardandoAutorizacao;
+  const status = $('autorizar-status');
+  // Depois de "Pedido enviado", só troca quando o computador autorizar (para o leitor de tela não repetir).
+  if (status.textContent !== texto && (texto === TEXTOS.aparelhoAutorizado || status.textContent !== TEXTOS.pedidoEnviado)) {
+    status.textContent = texto;
+  }
+}
+
+function fecharDialogoAparelho() {
+  if (pedindo) return;
+  etapaAparelho = null;
+  if ($('dlg-aparelho').open) $('dlg-aparelho').close();
+}
+
+function ocupadoAparelho(sim) {
+  pedindo = sim;
+  const b = $('autorizar-pedir-btn');
+  b.disabled = sim;
+  b.textContent = sim ? 'Pedindo…' : 'Pedir autorização';
+  $('autorizar-fechar').disabled = sim;
+  if (sim) $('dlg-aparelho').setAttribute('aria-busy', 'true');
+  else $('dlg-aparelho').removeAttribute('aria-busy');
+}
+
+// Cria (ou reaproveita) a chave deste aparelho e manda o pedido com a chave pública e o nome.
+async function pedirAutorizacao() {
+  if (pedindo) return;
+  const campo = $('autorizar-rotulo');
+  const erro = $('autorizar-erro');
+  const rotulo = campo.value.trim();
+  if (!rotuloValido(rotulo)) {
+    erro.textContent = TEXTOS.rotuloInvalido;
     campo.setAttribute('aria-invalid', 'true');
     campo.focus();
     return;
@@ -1593,106 +1650,112 @@ async function guardarCodigo() {
     erro.textContent = TEXTOS.semCripto;
     return;
   }
-  derivando = true;
-  const guardarBtn = $('codigo-guardar');
-  guardarBtn.disabled = true;
-  $('codigo-cancelar').disabled = true;
-  guardarBtn.textContent = 'Conferindo…';
-  $('dlg-codigo').setAttribute('aria-busy', 'true');
+  ocupadoAparelho(true);
   erro.textContent = '';
   try {
-    const aparelho = await derivarChave(normal);
-    campo.value = ''; // o código não fica nem no campo
+    let ap = null;
+    try { ap = await obter(); } catch { /* sem IndexedDB: guardar avisa logo abaixo */ }
+    // A chave guardada vale enquanto o computador não a conhece (pedido de novo, ou revogada e pedida outra
+    // vez). Se o computador conhece este kid e mesmo assim recusou a assinatura, é preciso uma chave nova.
+    if (ap && (aparelhoAutorizado(ap.kid) || !(await sincronizarAparelho(ap)))) ap = null;
+    if (!ap) {
+      const novo = await gerarAparelho();
+      try {
+        await guardar(novo);
+      } catch {
+        erro.textContent = TEXTOS.semIndexedDB;
+        return;
+      }
+      ap = novo;
+      await sincronizarAparelho(ap);
+    }
+    let r;
     try {
-      await guardar(aparelho);
-    } catch {
-      erro.textContent = TEXTOS.semIndexedDB;
+      r = await api('/api/aparelho', jsonOpcoes('POST', { kid: ap.kid, publica: ap.publica, rotulo }));
+    } catch (e) {
+      if (!(e instanceof NaoAutorizado)) erro.textContent = TEXTOS.erroRede;
       return;
     }
-    estado.kid = aparelho.kid;
-    const deComando = pedidoCodigo.deComando;
-    fecharDialogoCodigo(aparelho);
-    atualizarRodape(deComando ? null : TEXTOS.codigoGuardado);
+    if (!r.ok) {
+      erro.textContent = r.status === 429 ? TEXTOS.pedidosDemais : r.status === 400 ? TEXTOS.erro400 : TEXTOS.erroOutro;
+      return;
+    }
+    campo.value = '';
+    mostrarEtapaAparelho('aguardando');
+    $('autorizar-status').textContent = TEXTOS.pedidoEnviado;
+    $('autorizar-titulo').focus();
+    atualizarRodape();
   } catch {
-    erro.textContent = TEXTOS.codigoMalFormado;
+    erro.textContent = TEXTOS.erroChave;
   } finally {
-    derivando = false;
-    guardarBtn.disabled = false;
-    $('codigo-cancelar').disabled = false;
-    guardarBtn.textContent = 'Guardar neste aparelho';
-    $('dlg-codigo').removeAttribute('aria-busy');
+    ocupadoAparelho(false);
   }
 }
 
-$('codigo-guardar').addEventListener('click', guardarCodigo);
-$('codigo').addEventListener('keydown', (ev) => {
+$('autorizar-pedir-btn').addEventListener('click', pedirAutorizacao);
+$('autorizar-rotulo').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') {
     ev.preventDefault();
-    guardarCodigo();
+    pedirAutorizacao();
   }
 });
-$('codigo').addEventListener('input', () => {
-  $('codigo').removeAttribute('aria-invalid');
-  $('codigo-erro').textContent = '';
+$('autorizar-rotulo').addEventListener('input', () => {
+  $('autorizar-rotulo').removeAttribute('aria-invalid');
+  $('autorizar-erro').textContent = '';
 });
-$('codigo-mostrar').addEventListener('click', () => {
-  const campo = $('codigo');
-  const mostrar = campo.type === 'password';
-  campo.type = mostrar ? 'text' : 'password';
-  $('codigo-mostrar').setAttribute('aria-pressed', String(mostrar));
+$('autorizar-de-novo').addEventListener('click', () => {
+  mostrarEtapaAparelho('pedir');
+  $('autorizar-rotulo').focus();
 });
-$('codigo-cancelar').addEventListener('click', () => {
-  if (!derivando) fecharDialogoCodigo(null);
-});
-$('dlg-codigo').addEventListener('cancel', (ev) => {
+$('autorizar-fechar').addEventListener('click', fecharDialogoAparelho);
+$('dlg-aparelho').addEventListener('cancel', (ev) => {
   ev.preventDefault();
-  if (!derivando) fecharDialogoCodigo(null);
+  fecharDialogoAparelho();
 });
-$('dlg-codigo').addEventListener('close', () => {
-  if (pedidoCodigo) fecharDialogoCodigo(null);
+$('dlg-aparelho').addEventListener('close', () => {
+  etapaAparelho = null;
+  const o = origemAparelho;
+  origemAparelho = null;
+  if (o && o.isConnected && o !== document.body) o.focus();
 });
 
-// Chave para assinar: a guardada neste navegador ou, se não houver, a que o dono digitar agora.
+// Chave para assinar: a guardada neste navegador, se o computador já a autorizou. Senão, abre o diálogo (o
+// pedido ou a instrução de autorizar) e o comando não sai.
 async function chaveDoAparelho() {
-  try {
-    const a = await obter();
-    if (a) {
-      if (estado.kid !== a.kid) {
-        estado.kid = a.kid;
-        atualizarRodape();
-      }
-      return a;
-    }
-  } catch { /* sem IndexedDB: o diálogo avisa ao tentar guardar */ }
-  return abrirDialogoCodigo({ deComando: true });
+  let a = null;
+  try { a = await obter(); } catch { /* sem IndexedDB: o diálogo avisa ao tentar guardar */ }
+  const publico = await sincronizarAparelho(a);
+  if (a && publico && aparelhoAutorizado(a.kid)) return a;
+  abrirDialogoAparelho(publico ? 'aguardando' : 'pedir');
+  return null;
 }
 
 /* ---------- Rodapé "Este aparelho" ---------- */
 
 function atualizarRodape(status) {
   const texto = $('aparelho-texto');
-  const kid = estado.kid;
-  if (kid) {
-    const o = orquestracao();
-    const conhecido = o && Array.isArray(o.aparelhos) ? o.aparelhos.find((a) => a && a.kid === kid) : undefined;
-    const partes = ['Aparelho ', el('code', null, kid)];
+  const ap = estado.aparelho;
+  const o = orquestracao();
+  const conhecido = ap && o && Array.isArray(o.aparelhos) ? o.aparelhos.find((a) => a && a.kid === ap.kid) : undefined;
+  const aguardando = !!ap && !!o && Array.isArray(o.aparelhos) && !conhecido;
+  if (ap) {
+    const partes = ['Aparelho ', el('code', null, ap.kid)];
     if (conhecido && conhecido.rotulo) partes.push(' · ' + conhecido.rotulo);
-    else if (o && Array.isArray(o.aparelhos) && !conhecido) {
-      partes.push('. O computador não conhece este código; os comandos serão recusados. Digite o código de novo ou esqueça este aparelho.');
-    }
+    else if (aguardando) partes.push(', aguardando autorização no computador. Impressão digital ', el('code', null, ap.impressao), '.');
     texto.replaceChildren(...partes);
   } else {
-    texto.textContent = 'Este aparelho ainda não tem código.';
+    texto.textContent = 'Este aparelho ainda não está autorizado a mandar comandos.';
   }
-  $('aparelho-sair').hidden = !kid;
-  $('aparelho-informar').hidden = !!kid;
-  $('aparelho-trocar').hidden = !kid;
-  $('aparelho-esquecer').hidden = !kid;
+  $('aparelho-sair').hidden = !ap;
+  $('aparelho-autorizar').hidden = !!ap;
+  $('aparelho-instrucoes').hidden = !aguardando;
+  $('aparelho-esquecer').hidden = !ap;
   if (status !== undefined) $('aparelho-status').textContent = status || '';
+  if (etapaAparelho === 'aguardando') atualizarAguardando();
 }
 
-$('aparelho-informar').addEventListener('click', () => abrirDialogoCodigo());
-$('aparelho-trocar').addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
+$('aparelho-autorizar').addEventListener('click', () => abrirDialogoAparelho('pedir'));
+$('aparelho-instrucoes').addEventListener('click', () => abrirDialogoAparelho('aguardando'));
 $('aparelho-esquecer').addEventListener('click', () => {
   $('aparelho-botoes').hidden = true;
   $('aparelho-confirmar').hidden = false;
@@ -1712,12 +1775,15 @@ $('aparelho-confirmar').addEventListener('keydown', (ev) => {
     $('aparelho-esquecer').focus();
   }
 });
+// Apaga a chave deste navegador. A autorização no computador continua até o dono revogar lá; sem a chave
+// privada, ninguém mais assina com ela.
 $('aparelho-esquecer-sim').addEventListener('click', async () => {
+  const kid = estado.aparelho ? estado.aparelho.kid : null;
   try { await esquecer(); } catch { /* sem IndexedDB não há o que esquecer */ }
-  estado.kid = null;
+  estado.aparelho = null;
   fecharConfirmacaoAparelho();
-  atualizarRodape(TEXTOS.aparelhoEsquecido);
-  $('aparelho-informar').focus();
+  atualizarRodape(kid ? TEXTOS.aparelhoEsquecido(kid) : '');
+  $('aparelho-autorizar').focus();
 });
 
 /* ---------- Desenho e carga ---------- */
@@ -1944,7 +2010,7 @@ $('sair').addEventListener('click', async () => {
 /* ---------- Início ---------- */
 
 obter()
-  .then((a) => { estado.kid = a ? a.kid : null; })
-  .catch(() => { estado.kid = null; })
+  .then((a) => sincronizarAparelho(a))
+  .catch(() => sincronizarAparelho(null))
   .finally(() => atualizarRodape());
 carregarEstado();

@@ -1,13 +1,16 @@
 // Guarda a chave de comandos deste aparelho no IndexedDB (banco `moises`, armazém `chaves`, registro `comandos`).
-// Só fica guardado o par { kid, chave }, com a chave num CryptoKey NÃO extraível (public/assinatura.js): o código
-// digitado nunca passa por aqui. Nada vai para localStorage nem sessionStorage. Sem IndexedDB (navegação privada,
-// bloqueio do navegador), as funções rejeitam com CofreIndisponivel e o painel avisa; não há plano B.
+// Fica guardado { kid, chave, publica }: a chave privada ECDSA P-256 num CryptoKey NÃO extraível, gerada aqui mesmo
+// (public/assinatura.js), e a chave pública, que não é segredo e serve para mostrar a impressão digital e pedir a
+// autorização de novo. Nada secreto é digitado (achado A1). Nada vai para localStorage nem sessionStorage. Sem
+// IndexedDB (navegação privada, bloqueio do navegador), as funções rejeitam com CofreIndisponivel e o painel avisa;
+// não há plano B.
 
 const BANCO = 'moises';
 const VERSAO = 1;
 const ARMAZEM = 'chaves';
 const REGISTRO = 'comandos';
-const RE_KID = /^[a-z0-9]{6}$/;
+const RE_KID = /^[0-9a-f]{6}$/;
+const RE_PUBLICA = /^[A-Za-z0-9_-]{87}$/;
 
 export class CofreIndisponivel extends Error {
   constructor() {
@@ -55,20 +58,27 @@ async function noArmazem(modo, operacao) {
   }
 }
 
+// Só a chave privada ECDSA P-256, não extraível, que assina. A chave HMAC do antigo código do aparelho não vale mais.
 const chaveValida = (chave) =>
-  typeof CryptoKey !== 'undefined' && chave instanceof CryptoKey && chave.extractable === false;
+  typeof CryptoKey !== 'undefined' && chave instanceof CryptoKey && chave.extractable === false &&
+  chave.type === 'private' && chave.algorithm?.name === 'ECDSA' && chave.algorithm?.namedCurve === 'P-256' &&
+  chave.usages.includes('sign');
+
+const registroValido = (r) =>
+  !!r && typeof r.kid === 'string' && RE_KID.test(r.kid) && typeof r.publica === 'string' && RE_PUBLICA.test(r.publica) && chaveValida(r.chave);
 
 // Substitui o que houver. Recusa chave extraível: o que fica no aparelho não pode ser copiado.
-export async function guardar({ kid, chave }) {
-  if (typeof kid !== 'string' || !RE_KID.test(kid) || !chaveValida(chave)) throw new TypeError('Chave do aparelho inválida.');
-  await noArmazem('readwrite', (armazem) => armazem.put({ kid, chave }, REGISTRO));
+export async function guardar({ kid, chave, publica }) {
+  if (!registroValido({ kid, chave, publica })) throw new TypeError('Chave do aparelho inválida.');
+  await noArmazem('readwrite', (armazem) => armazem.put({ kid, chave, publica }, REGISTRO));
 }
 
-// → { kid, chave } ou null se o aparelho ainda não tem chave. Registro fora do formato conta como ausente.
+// → { kid, chave, publica } ou null se o aparelho ainda não tem chave. Registro fora do formato (inclusive o do
+// antigo código do aparelho) conta como ausente.
 export async function obter() {
   const reg = await noArmazem('readonly', (armazem) => armazem.get(REGISTRO));
-  if (!reg || typeof reg.kid !== 'string' || !RE_KID.test(reg.kid) || !chaveValida(reg.chave)) return null;
-  return { kid: reg.kid, chave: reg.chave };
+  if (!registroValido(reg)) return null;
+  return { kid: reg.kid, chave: reg.chave, publica: reg.publica };
 }
 
 export async function esquecer() {

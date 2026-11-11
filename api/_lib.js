@@ -7,6 +7,7 @@ export const K = {
   cmds: 'moises:cmds',
   logs: 'moises:logs',
   painelVistoEm: 'moises:painelVistoEm',
+  aparelhosPedidos: 'moises:aparelhos-pedidos',
   tentativas: (ip) => `moises:login:${ip}`,
 };
 
@@ -18,7 +19,34 @@ export const EXPIRA_CMD_MS = 120_000;
 // O servidor só transporta: confere formato, nunca a assinatura (a chave fica no aparelho e no coletor).
 export const TIPOS_CMD = ['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar'];
 export const RE_CHAVE = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const RE_KID = /^[a-z0-9]{6}$/;
+// ECDSA P-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15). A assinatura HMAC do código do
+// aparelho (43 caracteres) não passa daqui.
+export const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
 export const MAX_PENDENTES = 20;
+
+// ---------- Pedidos de pareamento de aparelho ----------
+// O painel guarda a chave pública que o aparelho gerou; o coletor a leva para o computador, onde o dono
+// confere a impressão digital e autoriza pelo terminal. O servidor só transporta (achado A1).
+export const MAX_PEDIDOS_APARELHO = 5;
+export const VALIDADE_PEDIDO_APARELHO_MS = 3_600_000;
+
+// Separa os pedidos guardados (resultado de HGETALL) em válidos (mais novos que 1 h) e vencidos.
+export function pedidosDeAparelho(hashArr, agora) {
+  const validos = [];
+  const vencidos = [];
+  for (let i = 0; hashArr && i < hashArr.length; i += 2) {
+    let p = null;
+    try {
+      p = JSON.parse(hashArr[i + 1]);
+    } catch {
+      /* valor corrompido: vence */
+    }
+    if (p && typeof p === 'object' && Number.isFinite(p.criadoEm) && agora - p.criadoEm < VALIDADE_PEDIDO_APARELHO_MS) validos.push(p);
+    else vencidos.push(hashArr[i]);
+  }
+  return { validos, vencidos };
+}
 
 // Hora do servidor em que o comando chegou; registros antigos só têm criadoEm.
 export const chegadaDoComando = (c) => (Number.isFinite(c.recebidoNoServidorEm) ? c.recebidoNoServidorEm : c.criadoEm);

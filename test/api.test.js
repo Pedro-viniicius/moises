@@ -1,5 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { gerarHashSenha } from '../api/_lib.js';
@@ -9,8 +10,10 @@ import estado from '../api/estado.js';
 import comando from '../api/comando.js';
 import logs from '../api/logs.js';
 import ingest from '../api/ingest.js';
+import aparelhoRota from '../api/aparelho.js';
 
 import { instalarRedisFalso } from '../scripts/redis-memoria.js';
+import { aparelho as novoAparelho } from './fixtures/aparelho.js';
 
 const redisFalso = instalarRedisFalso();
 
@@ -50,8 +53,11 @@ const coletor = { authorization: `Bearer ${'y'.repeat(43)}` };
 const CHAVE = 'principal:4e00abb1-1234-4abc-8def-0123456789ab';
 const retrato = (status = 'ativa') => ({ ...RETRATO_INICIAL, totalDia: 1, sessoes: [{ chave: CHAVE, projeto: 'p', status, custo: 1 }] });
 
-// O servidor não tem a chave do aparelho: confere só o formato. Qualquer string base64url de 43 caracteres serve.
-const ASSINATURA = 'AbCd_-0123456789abcdefghijklmnopqrstuvwxyzA';
+// O servidor não tem a chave do aparelho: confere só o formato. Qualquer string base64url de 86 caracteres
+// serve (ECDSA P-256 em IEEE P1363, tarefa 15).
+const ASSINATURA = 'AbCd_-0123456789abcdefghijklmnopqrstuvwxyz'.repeat(3).slice(0, 85) + 'A';
+// Assinatura HMAC do código do aparelho (formato antigo, 43 caracteres): recusada no formato (achado A1).
+const ASSINATURA_HMAC = 'AbCd_-0123456789abcdefghijklmnopqrstuvwxyzA';
 const MARCA = 'TEXTO-SIGILOSO-DA-MENSAGEM';
 let seq = 0;
 const novoId = () => `c_${(++seq).toString(16).padStart(16, '0')}`;
@@ -219,9 +225,11 @@ test('comando recusa formato inválido', async () => {
     'dados lista': cmdValido({ dados: '[]' }),
     'dados com 8.001 caracteres': cmdValido({ dados: dadosCom(8001) }),
     'assinatura ausente': sem('assinatura'),
-    'assinatura com 42': cmdValido({ assinatura: ASSINATURA.slice(1) }),
-    'assinatura com 44': cmdValido({ assinatura: `${ASSINATURA}A` }),
+    'assinatura com 85': cmdValido({ assinatura: ASSINATURA.slice(1) }),
+    'assinatura com 87': cmdValido({ assinatura: `${ASSINATURA}A` }),
     'assinatura com =': cmdValido({ assinatura: `${ASSINATURA.slice(1)}=` }),
+    'assinatura HMAC antiga (43)': cmdValido({ assinatura: ASSINATURA_HMAC }),
+    'assinatura com 88 (DER curta)': cmdValido({ assinatura: `${ASSINATURA}AA` }),
     'campo a mais': cmdValido({ estado: 'feito' }),
     'corpo lista': [cmdValido()],
     'corpo null': null,
@@ -556,4 +564,122 @@ test('cabeçalhos: CSP com trusted types e COOP', () => {
   assert.ok(csp.includes("default-src 'self'"));
   assert.ok(csp.includes("require-trusted-types-for 'script'"));
   assert.equal(cab['Cross-Origin-Opener-Policy'], 'same-origin');
+});
+
+// ---------------------------------------------------------------- pareamento por par de chaves (tarefa 15, A1)
+
+const pedirAutorizacao = (cookie, corpo, headers = {}) => chamar(aparelhoRota, { method: 'POST', body: corpo, headers: { cookie, ...headers } });
+const pedidoDe = (ap, extra = {}) => ({ kid: ap.kid, publica: ap.publica, rotulo: ap.rotulo, ...extra });
+const pedidosGuardados = () => [...(redisFalso.db.get('moises:aparelhos-pedidos') || new Map()).values()].map((v) => JSON.parse(v));
+
+test('POST /api/aparelho exige cookie e JSON', async () => {
+  const ap = novoAparelho();
+  assert.equal((await chamar(aparelhoRota, { method: 'POST', body: pedidoDe(ap) })).statusCode, 401);
+  assert.equal((await chamar(aparelhoRota, { method: 'POST', body: pedidoDe(ap), headers: { cookie: 'moises=9999999999.forjado' } })).statusCode, 401);
+  const cookie = await entrar();
+  assert.equal((await pedirAutorizacao(cookie, pedidoDe(ap), { 'content-type': 'text/plain' })).statusCode, 415);
+  assert.equal((await chamar(aparelhoRota, { method: 'GET', headers: { cookie } })).statusCode, 405);
+  assert.equal(redisFalso.db.get('moises:aparelhos-pedidos'), undefined);
+});
+
+test('POST /api/aparelho recusa pedido fora do formato, sem repetir o conteúdo', async () => {
+  const cookie = await entrar();
+  // Um kid com ao menos uma letra, para o caso do kid maiúsculo ser outro kid de fato.
+  let ap;
+  do ap = novoAparelho(null, 'celular');
+  while (!/[a-f]/.test(ap.kid));
+  const bytes = Buffer.from(ap.publica, 'base64url');
+  const foraDaCurva = Buffer.from(bytes);
+  foraDaCurva[64] ^= 1;
+  const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const naoCanonica = ap.publica.slice(0, 86) + B64URL[B64URL.indexOf(ap.publica.at(-1)) ^ 1];
+  const sem = (campo) => {
+    const c = pedidoDe(ap);
+    delete c[campo];
+    return c;
+  };
+  const casos = {
+    'kid de outra chave': pedidoDe(ap, { kid: novoAparelho().kid }),
+    'kid maiúsculo': pedidoDe(ap, { kid: ap.kid.toUpperCase() }),
+    'kid ausente': sem('kid'),
+    'pública ausente': sem('publica'),
+    'pública curta': pedidoDe(ap, { publica: ap.publica.slice(1) }),
+    'pública comprimida': pedidoDe(ap, { publica: Buffer.concat([Buffer.from([2]), bytes.subarray(1, 33)]).toString('base64url') }),
+    'pública não canônica': pedidoDe(ap, { publica: naoCanonica }),
+    'pública fora da curva': pedidoDe(ap, { publica: foraDaCurva.toString('base64url'), kid: crypto.createHash('sha256').update(foraDaCurva).digest('hex').slice(0, 6) }),
+    'pública que não é texto': pedidoDe(ap, { publica: [...bytes] }),
+    'rótulo ausente': sem('rotulo'),
+    'rótulo vazio': pedidoDe(ap, { rotulo: '' }),
+    'rótulo só de espaços': pedidoDe(ap, { rotulo: '   ' }),
+    'rótulo com 41': pedidoDe(ap, { rotulo: 'a'.repeat(41) }),
+    'rótulo com quebra de linha': pedidoDe(ap, { rotulo: 'celular\nfalso' }),
+    'rótulo com controle de direção': pedidoDe(ap, { rotulo: `celular${String.fromCodePoint(0x202e)}` }),
+    'rótulo número': pedidoDe(ap, { rotulo: 7 }),
+    'campo a mais': pedidoDe(ap, { impressao: 'abcd-abcd-abcd-abcd' }),
+    'corpo lista': [pedidoDe(ap)],
+    'corpo null': null,
+  };
+  for (const [nome, corpo] of Object.entries(casos)) {
+    const r = await pedirAutorizacao(cookie, corpo);
+    assert.equal(r.statusCode, 400, nome);
+    assert.ok(!JSON.stringify(r.body).includes(ap.publica), `${nome}: a resposta não repete a chave`);
+  }
+  assert.equal(redisFalso.db.get('moises:aparelhos-pedidos'), undefined, 'nada foi gravado');
+  // Rótulo com 40 caracteres (acentuados) e espaços nas pontas passa, guardado sem os espaços.
+  const r = await pedirAutorizacao(cookie, pedidoDe(ap, { rotulo: `  ${'ç'.repeat(40)}  ` }));
+  assert.equal(r.statusCode, 200);
+  assert.deepEqual(r.body, { kid: ap.kid });
+  assert.equal(pedidosGuardados()[0].rotulo, 'ç'.repeat(40));
+});
+
+test('POST /api/aparelho guarda o pedido e o ingest o entrega só ao coletor com protocolo 2', async () => {
+  const cookie = await entrar();
+  const ap = novoAparelho(null, 'celular do dono');
+  const antes = Date.now();
+  const r = await pedirAutorizacao(cookie, pedidoDe(ap));
+  assert.equal(r.statusCode, 200);
+  assert.deepEqual(r.body, { kid: ap.kid });
+  const [guardado] = pedidosGuardados();
+  assert.deepEqual(Object.keys(guardado).sort(), ['criadoEm', 'kid', 'publica', 'rotulo']);
+  assert.equal(guardado.publica, ap.publica);
+  assert.ok(guardado.criadoEm >= antes && guardado.criadoEm <= Date.now(), 'hora do servidor');
+  // O coletor antigo não recebe pedidos de pareamento; o novo recebe kid, pública, rótulo e hora.
+  for (const protocolo of [undefined, 1, '2']) {
+    const velho = await chamar(ingest, { method: 'POST', body: { protocolo }, headers: coletor });
+    assert.equal(velho.body.aparelhosPedidos, undefined, `protocolo ${protocolo}`);
+  }
+  const novo = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
+  assert.deepEqual(novo.body.aparelhosPedidos, [{ kid: ap.kid, publica: ap.publica, rotulo: 'celular do dono', criadoEm: guardado.criadoEm }]);
+  // O painel não vê os pedidos nem a chave pública no estado.
+  const e = await chamar(estado, { headers: { cookie } });
+  assert.ok(!JSON.stringify(e.body).includes(ap.publica));
+  // Pedir de novo com o mesmo aparelho substitui o pedido (rótulo novo), sem ocupar outra vaga.
+  assert.equal((await pedirAutorizacao(cookie, pedidoDe(ap, { rotulo: 'outro nome' }))).statusCode, 200);
+  assert.deepEqual(pedidosGuardados().map((p) => p.rotulo), ['outro nome']);
+});
+
+test('no máximo 5 pedidos de pareamento, e cada um vale 1 hora', async () => {
+  const cookie = await entrar();
+  const aps = Array.from({ length: 6 }, (_, i) => novoAparelho(null, `aparelho ${i}`));
+  for (const ap of aps.slice(0, 5)) assert.equal((await pedirAutorizacao(cookie, pedidoDe(ap))).statusCode, 200);
+  const sexto = await pedirAutorizacao(cookie, pedidoDe(aps[5]));
+  assert.equal(sexto.statusCode, 429);
+  assert.equal(sexto.body.erro, 'Há pedidos de autorização demais esperando o computador. Autorize os que são seus ou espere uma hora e tente de novo.');
+  assert.equal(pedidosGuardados().length, 5);
+  // Um dos cinco pedindo de novo continua cabendo.
+  assert.equal((await pedirAutorizacao(cookie, pedidoDe(aps[0]))).statusCode, 200);
+  const entregues = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
+  assert.deepEqual(entregues.body.aparelhosPedidos.map((p) => p.kid).sort(), aps.slice(0, 5).map((a) => a.kid).sort());
+  // Uma hora depois, nenhum vale: o ingest não entrega e apaga; o sexto passa a caber.
+  await comRelogio(3_600_001, async () => {
+    const r = await chamar(ingest, { method: 'POST', body: { protocolo: 2 }, headers: coletor });
+    assert.deepEqual(r.body.aparelhosPedidos, []);
+    assert.equal(pedidosGuardados().length, 0);
+    assert.equal((await pedirAutorizacao(cookie, pedidoDe(aps[5]))).statusCode, 200);
+  });
+  // Vencidos também saem quando o painel pede, mesmo sem o coletor buscar.
+  await comRelogio(2 * 3_600_002, async () => {
+    for (const ap of aps.slice(0, 5)) assert.equal((await pedirAutorizacao(cookie, pedidoDe(ap))).statusCode, 200);
+    assert.deepEqual(pedidosGuardados().map((p) => p.kid).sort(), aps.slice(0, 5).map((a) => a.kid).sort());
+  });
 });
