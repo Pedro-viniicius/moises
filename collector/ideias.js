@@ -100,9 +100,12 @@ export class Ideias {
     }
   }
 
+  // Grava num temporário e renomeia: um corte no meio não zera o teto diário.
   salvar() {
     fs.mkdirSync(this.pasta, { recursive: true });
-    fs.writeFileSync(this.arquivo, JSON.stringify(this.d));
+    const tmp = `${this.arquivo}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(this.d));
+    fs.renameSync(tmp, this.arquivo);
   }
 
   assinatura(s) {
@@ -120,7 +123,9 @@ export class Ideias {
     retrato.custoIdeiasHoje = Math.round((this.d.gastoPorDia[hoje] || 0) * 10000) / 10000;
     if (!this.ocupado) {
       const alvo = retrato.sessoes.find((s) => s.status !== 'encerrada' && (s.tarefa || s.resumo) && this.precisa(s));
-      if (alvo && (this.d.chamadasPorDia[hoje] || 0) < TETO_DIA) this.gerar(alvo, hoje);
+      if (alvo && (this.d.chamadasPorDia[hoje] || 0) < TETO_DIA) {
+        this.gerar(alvo, hoje).catch((err) => console.error('[ideias] falha:', err.message));
+      }
     }
     return retrato;
   }

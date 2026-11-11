@@ -51,6 +51,8 @@ test('login: cookie seguro, senha errada, bloqueio depois de 5 erros', async () 
   for (let i = 0; i < 5; i++) assert.equal((await chamar(login, { method: 'POST', body: { senha: 'errada' } })).statusCode, 401);
   const bloqueado = await chamar(login, { method: 'POST', body: { senha: SENHA } });
   assert.equal(bloqueado.statusCode, 429);
+  // outro IP não fica trancado (sem trava global)
+  assert.equal((await chamar(login, { method: 'POST', body: { senha: SENHA }, headers: { 'x-forwarded-for': '9.9.9.9' } })).statusCode, 200);
   assert.equal((await chamar(login, { method: 'POST', body: { senha: SENHA }, headers: { 'content-type': 'text/plain' } })).statusCode, 415);
   assert.equal((await chamar(login, { method: 'GET' })).statusCode, 405);
 });
@@ -90,7 +92,7 @@ test('fluxo completo: retrato → encerrar → coletor executa → log no histó
   assert.equal(cmd.chave, 'principal:s1');
   assert.equal(cmd.nome, '2026-11-10 p – teste');
 
-  await chamar(ingest, { method: 'POST', body: { retrato: retrato('encerrada'), acks: [{ id: cmd.id, ok: true, log: { projeto: 'p', custo: 1.5, duracaoMs: 60000 } }] }, headers: coletor });
+  await chamar(ingest, { method: 'POST', body: { retrato: retrato('encerrada'), acks: [{ id: cmd.id, ok: true, log: { projeto: 'p', custo: 1.5, duracaoMs: 60000, intruso: 'x'.repeat(10) } }] }, headers: coletor });
   const e2 = await chamar(estado, { headers: { cookie } });
   assert.equal(e2.body.comandos[0].estado, 'feito');
   assert.equal((await chamar(ingest, { method: 'POST', body: {}, headers: coletor })).body.comandos.length, 0);
@@ -100,6 +102,7 @@ test('fluxo completo: retrato → encerrar → coletor executa → log no histó
   assert.equal(l1.body.logs.length, 1);
   assert.equal(l1.body.logs[0].nome, '2026-11-10 p – teste');
   assert.equal(l1.body.logs[0].custo, 1.5);
+  assert.equal(l1.body.logs[0].intruso, undefined); // só campos conhecidos são gravados
   await chamar(logs, { method: 'PATCH', body: { id: cmd.id, nome: 'Novo nome' }, headers: { cookie } });
   assert.equal((await chamar(logs, { url: '/api/logs?q=novo', headers: { cookie } })).body.logs[0].nome, 'Novo nome');
   assert.equal((await chamar(logs, { url: '/api/logs?q=nada', headers: { cookie } })).body.logs.length, 0);

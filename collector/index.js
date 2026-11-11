@@ -28,6 +28,16 @@ function lerConf() {
   return { url: process.env.MOISES_URL || out.MOISES_URL, token: process.env.MOISES_TOKEN || out.MOISES_TOKEN };
 }
 
+// Token e retrato só trafegam cifrados (exceto no servidor local de teste).
+export function urlAceita(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
 // Hash do que importa no retrato (sem horários que mudam a cada ciclo sem mudança real).
 function assinatura(r) {
   const base = r.sessoes.map((s) => [s.chave, s.status, s.custo, s.modelo, s.esforco, s.tarefa, s.ultimaAtividade, s.sugestao?.geradaEm]);
@@ -40,21 +50,22 @@ async function enviar(conf, corpo) {
     headers: { authorization: `Bearer ${conf.token}`, 'content-type': 'application/json' },
     body: JSON.stringify(corpo),
     signal: AbortSignal.timeout(15_000),
+    redirect: 'error', // nunca reenviar o retrato para outra origem
   });
   if (!r.ok) throw new Error(`painel respondeu ${r.status}`);
   return r.json();
 }
 
 async function main() {
-  const coletor = new Coletor();
+  const coletor = new Coletor({ ignorarCwds: [ESTADO] });
   const ideias = new Ideias({ pastaEstado: ESTADO });
   if (process.argv.includes('--uma-vez')) {
     console.log(JSON.stringify(ideias.aplicar(coletor.retrato()), null, 2));
     return;
   }
   const conf = lerConf();
-  if (!conf.url || !conf.token) {
-    console.error(`[coletor] configure MOISES_URL e MOISES_TOKEN em ${CONF}`);
+  if (!conf.url || !conf.token || !urlAceita(conf.url)) {
+    console.error(`[coletor] configure MOISES_URL (https) e MOISES_TOKEN em ${CONF}`);
     process.exit(1);
   }
   console.log(`[coletor] lendo ${coletor.dirs.length} diretórios; enviando para ${new URL(conf.url).host} a cada ${INTERVALO_MS / 1000}s`);
@@ -93,4 +104,4 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.url === `file://${process.argv[1]}`) main();

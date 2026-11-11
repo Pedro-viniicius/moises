@@ -1,6 +1,7 @@
 import { rota, json, lerCorpo, tokenColetorValido, pipeline, hashParaObjetos, K, EXPIRA_CMD_MS } from './_lib.js';
 
 const GUARDA_CMD_MS = 24 * 3600 * 1000;
+const CAMPOS_LOG = ['projeto', 'conta', 'tarefa', 'resumo', 'iniciadaEm', 'encerradaEm', 'duracaoMs', 'modelo', 'esforco', 'porModelo', 'tokens', 'custo'];
 
 export default rota(['POST'], async (req, res) => {
   if (!tokenColetorValido(req)) return json(res, 401, { erro: 'Token inválido.' });
@@ -19,7 +20,8 @@ export default rota(['POST'], async (req, res) => {
     c.feitoEm = agora;
     muda.push(['HSET', K.cmds, c.id, JSON.stringify(c)]);
     if (a.ok && a.log && typeof a.log === 'object') {
-      const log = { ...a.log, id: c.id, chave: c.chave, nome: String(a.log.nome || c.nome || c.chave).slice(0, 140), criadoEm: agora };
+      const log = { id: c.id, chave: c.chave, criadoEm: agora, nome: String(a.log.nome || c.nome || c.chave).slice(0, 140) };
+      for (const campo of CAMPOS_LOG) if (a.log[campo] !== undefined) log[campo] = a.log[campo];
       muda.push(['HSET', K.logs, log.id, JSON.stringify(log)]);
     }
   }

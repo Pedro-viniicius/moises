@@ -1,6 +1,7 @@
 // Leitura incremental de um transcript .jsonl do Claude Code.
 // Cada arquivo guarda a posição já lida; só as linhas novas são processadas.
 import fs from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { custo, tokensDe } from './precos.js';
 
 const BLOCO = 4 * 1024 * 1024;
@@ -86,16 +87,17 @@ export function lerNovidades(caminho, est, opts = { principal: true }) {
   let fd;
   try {
     const st = fs.statSync(caminho);
-    if (st.size < est.offset) Object.assign(est, novoEstado()); // arquivo truncado/recriado
+    if (st.size < est.offset) Object.assign(est, novoEstado(), { decoder: null }); // arquivo truncado/recriado
     if (st.size === est.offset) return false;
     fd = fs.openSync(caminho, 'r');
     // Em blocos, para um transcript de dezenas de MB não ocupar memória de uma vez.
     const buf = Buffer.alloc(BLOCO);
+    const dec = (est.decoder ||= new StringDecoder('utf8'));
     while (est.offset < st.size) {
       const n = fs.readSync(fd, buf, 0, Math.min(BLOCO, st.size - est.offset), est.offset);
       if (n <= 0) break;
       est.offset += n;
-      const linhas = (est.resto + buf.toString('utf8', 0, n)).split('\n');
+      const linhas = (est.resto + dec.write(buf.subarray(0, n))).split('\n');
       est.resto = linhas.pop(); // linha incompleta fica para o próximo bloco
       for (const l of linhas) if (l.trim()) processarLinha(est, l, opts);
     }
@@ -109,11 +111,12 @@ export function lerNovidades(caminho, est, opts = { principal: true }) {
 }
 
 // Soma custos e tokens das respostas, opcionalmente filtrando por dia.
-export function somar(estados, dia = null) {
+export function somar(estados, dia = null, ignorar = null) {
   const total = { custo: 0, tokens: { input: 0, output: 0, read: 0, w5m: 0, w1h: 0 }, porModelo: {} };
   for (const est of estados) {
-    for (const r of est.respostas.values()) {
+    for (const [chave, r] of est.respostas) {
       if (dia && r.dia !== dia) continue;
+      if (ignorar?.has(chave)) continue;
       total.custo += r.custo;
       const pm = (total.porModelo[r.model] ||= { custo: 0, tokens: 0 });
       pm.custo += r.custo;

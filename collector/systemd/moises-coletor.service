@@ -11,6 +11,10 @@ Restart=always
 RestartSec=10
 Nice=10
 MemoryHigh=400M
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
 
 [Install]
 WantedBy=default.target

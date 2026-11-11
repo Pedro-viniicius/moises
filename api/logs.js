@@ -1,5 +1,6 @@
 import { rota, json, exigeLogin, exigeJson, lerCorpo, redis, hashParaObjetos, K } from './_lib.js';
 
+const MAX_LOGS = 500;
 const norm = (s) => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
 export default rota(['GET', 'PATCH'], async (req, res) => {
@@ -7,6 +8,11 @@ export default rota(['GET', 'PATCH'], async (req, res) => {
   if (req.method === 'GET') {
     const q = norm(new URL(req.url, 'http://x').searchParams.get('q'));
     let logs = hashParaObjetos(await redis('HGETALL', K.logs)).sort((a, b) => b.criadoEm - a.criadoEm);
+    // Guarda só os 500 mais recentes.
+    if (logs.length > MAX_LOGS) {
+      await redis('HDEL', K.logs, ...logs.slice(MAX_LOGS).map((l) => l.id));
+      logs = logs.slice(0, MAX_LOGS);
+    }
     if (q) logs = logs.filter((l) => norm([l.nome, l.projeto, l.tarefa, l.resumo].join(' ')).includes(q));
     return json(res, 200, { logs });
   }

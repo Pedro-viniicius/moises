@@ -1,11 +1,12 @@
 // Executa um pedido de encerrar vindo do painel. Só encerra a sessão indicada e só se
-// pid, sessionId e início do processo baterem com o registro do próprio Claude Code.
+// pid, sessionId, início do processo e executável baterem com o registro do próprio Claude Code.
+// Os limites daqui são locais: nem o site nem o Redis conseguem afrouxá-los.
 import fs from 'node:fs';
-import path from 'node:path';
-import { processoConfere, inicioDoProcesso } from './sessoes.js';
+import { processoConfere, inicioDoProcesso, nomeConta } from './sessoes.js';
 import { diaLocal } from './transcript.js';
 
 export const EXPIRA_MS = 120_000;
+export const MAX_POR_HORA = Number(process.env.MOISES_ENCERRAR_POR_HORA || 5);
 const espera = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function nomePadrao(sessao, agora = Date.now()) {
@@ -13,30 +14,44 @@ export function nomePadrao(sessao, agora = Date.now()) {
   return `${diaLocal(agora)} ${sessao.projeto} – ${resumo}`;
 }
 
-function ehClaude(pid) {
+// Só o executável do Claude Code: nome do processo "claude", ou node rodando o pacote dele.
+export function ehClaude(pid) {
   try {
-    const comm = fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-    if (comm.startsWith('claude')) return true;
-    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-    return /(^|[\/\0])claude(\0|$)|claude-code|@anthropic-ai/.test(cmd);
+    if (fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'claude') return true;
+    const argv = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+    return argv.slice(0, 2).some((a) => /(^|\/)claude$/.test(a) || a.includes('/@anthropic-ai/claude-code/'));
   } catch {
     return false;
   }
 }
 
+// Memória local do que já foi executado e do ritmo de encerramentos.
+const executados = new Set();
+const recentes = [];
+
 export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => process.kill(pid, sig), esperaMaxMs = 10_000, agora = () => Date.now() } = {}) {
-  if (!(cmd.idadeMs < EXPIRA_MS)) return { ok: false, erro: 'Pedido antigo demais; peça de novo.' };
+  if (process.env.MOISES_ENCERRAR === '0') return { ok: false, erro: 'Encerrar pelo painel está desligado neste computador.' };
+  if (executados.has(cmd.id)) return { ok: false, erro: 'Pedido repetido; já foi tratado.' };
+  executados.add(cmd.id);
+  if (!(cmd.idadeMs >= 0 && cmd.idadeMs < EXPIRA_MS)) return { ok: false, erro: 'Pedido antigo demais; peça de novo.' };
+  while (recentes.length && agora() - recentes[0] > 3600_000) recentes.shift();
+  if (recentes.length >= MAX_POR_HORA) return { ok: false, erro: `Limite de ${MAX_POR_HORA} encerramentos por hora atingido.` };
+
   const sep = String(cmd.chave || '').indexOf(':');
   if (sep < 1) return { ok: false, erro: 'Pedido sem sessão válida.' };
   const conta = cmd.chave.slice(0, sep);
   const sessionId = cmd.chave.slice(sep + 1);
-  const dir = coletor.dirs.find((d) => (path.basename(d).replace(/^\.claude-?/, '') || 'principal') === conta);
+  const dir = coletor.dirs.find((d) => nomeConta(d) === conta);
   if (!dir) return { ok: false, erro: 'Conta desconhecida neste computador.' };
   const reg = coletor.registroDe(dir, sessionId);
   if (!reg) return { ok: false, erro: 'A sessão não está registrada como aberta.' };
-  if (!processoConfere(reg)) return { ok: false, erro: 'O processo da sessão já terminou.' };
+  if (reg.procStart == null) return { ok: false, erro: 'Registro sem início do processo; nada foi feito.' };
+  if (!processoConfere(reg, { estrito: true })) return { ok: false, erro: 'O processo da sessão já terminou.' };
   if (!ehClaude(reg.pid)) return { ok: false, erro: 'O processo não é do Claude Code; nada foi feito.' };
 
+  // Retrato da sessão antes do fim: garante o log mesmo se ela não tiver atividade hoje.
+  const antes = coletor.sessaoDe(cmd.chave);
+  recentes.push(agora());
   kill(reg.pid, 'SIGTERM');
   const limite = agora() + esperaMaxMs;
   while (agora() < limite && inicioDoProcesso(reg.pid) === String(reg.procStart)) await espera(250);
@@ -44,7 +59,7 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
 
   // Relê os transcripts depois do fim para o log sair com os números finais.
   const fim = agora();
-  const sessao = coletor.retrato().sessoes.find((s) => s.chave === cmd.chave);
+  const sessao = coletor.sessaoDe(cmd.chave) || antes;
   if (!sessao) return { ok: true, log: { nome: cmd.nome || cmd.chave, encerradaEm: fim } };
   const inicio = sessao.iniciadaEm || null;
   return {

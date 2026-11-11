@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -8,10 +8,19 @@ import { custo } from '../collector/precos.js';
 import { novoEstado, lerNovidades, somar, diaLocal } from '../collector/transcript.js';
 import { Coletor, statusDe, inicioDoProcesso, fatorOficial } from '../collector/sessoes.js';
 import { redigir } from '../collector/redigir.js';
-import { executarEncerrar, nomePadrao } from '../collector/encerrar.js';
+import { executarEncerrar, nomePadrao, ehClaude } from '../collector/encerrar.js';
+import { urlAceita } from '../collector/index.js';
 import { recomendar, lerResposta, Ideias } from '../collector/ideias.js';
 
-const tmp = () => fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'moises-'));
+const criadas = [];
+const tmp = () => {
+  const d = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'moises-'));
+  criadas.push(d);
+  return d;
+};
+after(() => {
+  for (const d of criadas) fs.rmSync(d, { recursive: true, force: true });
+});
 const linha = (o) => JSON.stringify(o) + '\n';
 const agoraIso = (ms = Date.now()) => new Date(ms).toISOString();
 
@@ -91,8 +100,15 @@ test('status a partir do registro da sessão', () => {
 });
 
 test('redigir esconde segredos, e-mails e telefones e corta o tamanho', () => {
-  const s = redigir('chave sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA token gho_abcdefghijklmnopqrstuvwxyz123456 mail a.b@x.com tel (35) 99999-8888 senha=hunter2');
-  for (const vazado of ['sk-ant', 'gho_', 'a.b@x.com', '99999', 'hunter2']) assert.ok(!s.includes(vazado), `${vazado} em ${s}`);
+  const s = redigir(
+    'chave sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA token gho_abcdefghijklmnopqrstuvwxyz123456 mail a.b@x.com tel (35) 99999-8888 senha=hunter2 ' +
+      'postgres://admin:s3gr3d0@localhost:5432/app client_secret=cs123 access_token=at456 AIzaSyA1234567890abcdefghijklmnopqrstuv ' +
+      'CPF 123.456.789-09 CNPJ 12.345.678/0001-90 a senha é hunter3xyz Authorization: Bearer abc.def sk_live_abcdefghij1234',
+    2000,
+  );
+  for (const vazado of ['sk-ant', 'gho_', 'a.b@x.com', '99999', 'hunter2', 's3gr3d0', 'cs123', 'at456', 'AIza', '789-09', '0001-90', 'hunter3', 'abc.def', 'sk_live'])
+    assert.ok(!s.includes(vazado), `${vazado} em ${s}`);
+  assert.equal(redigir('Implementar login com senha forte no painel'), 'Implementar login com senha forte no painel');
   assert.equal(redigir('palavra '.repeat(100), 50).length, 50);
   assert.equal(redigir(null), null);
 });
@@ -136,7 +152,7 @@ test('retrato: sessão viva, sessão encerrada hoje, subagentes e total do dia',
     sessionId: 'bbbb',
     pid: 999999,
     procStart: '1',
-    linhas: resposta({ model: 'claude-haiku-5-5' }),
+    linhas: resposta({ id: 'haiku', req: 'haiku', model: 'claude-haiku-5-5' }),
   });
   const c = new Coletor({ dirs: [viva, morta] });
   const r = c.retrato();
@@ -171,23 +187,26 @@ test('encerrar: só o processo indicado, conferindo pid, início e nome; grava o
   const c = new Coletor({ dirs: [dir] });
   c.retrato();
 
-  assert.match((await executarEncerrar(c, { chave: 'principal:cccc', idadeMs: 130_000 })).erro, /antigo/);
-  assert.match((await executarEncerrar(c, { chave: 'principal:zzzz', idadeMs: 1000 })).erro, /não está registrada/);
+  assert.match((await executarEncerrar(c, { id: 'a1', chave: 'principal:cccc', idadeMs: 130_000 })).erro, /antigo/);
+  assert.match((await executarEncerrar(c, { id: 'a2', chave: 'principal:zzzz', idadeMs: 1000 })).erro, /não está registrada/);
 
   // pid certo, mas início diferente (pid reaproveitado): recusa
   const regArq = path.join(dir, 'sessions', `${filho.pid}.json`);
   const reg = JSON.parse(fs.readFileSync(regArq, 'utf8'));
   fs.writeFileSync(regArq, JSON.stringify({ ...reg, procStart: '1' }));
-  assert.match((await executarEncerrar(c, { chave: 'principal:cccc', idadeMs: 1000 })).erro, /já terminou/);
+  assert.match((await executarEncerrar(c, { id: 'a3', chave: 'principal:cccc', idadeMs: 1000 })).erro, /já terminou/);
+  fs.writeFileSync(regArq, JSON.stringify({ ...reg, procStart: undefined }));
+  assert.match((await executarEncerrar(c, { id: 'a4', chave: 'principal:cccc', idadeMs: 1000 })).erro, /sem início do processo/);
   fs.writeFileSync(regArq, JSON.stringify(reg));
 
   const sinais = [];
-  const r = await executarEncerrar(c, { chave: 'principal:cccc', idadeMs: 1000, nome: null }, { kill: (pid, s) => (sinais.push([pid, s]), process.kill(pid, s)) });
+  const r = await executarEncerrar(c, { id: 'a5', chave: 'principal:cccc', idadeMs: 1000, nome: null }, { kill: (pid, s) => (sinais.push([pid, s]), process.kill(pid, s)) });
   assert.equal(r.ok, true, r.erro);
   assert.deepEqual(sinais, [[filho.pid, 'SIGTERM']]);
   assert.equal(r.log.nome, `${diaLocal(Date.now())} projeto-a – Revisar textos`);
   assert.equal(r.log.modelo, 'claude-opus-5-5');
   assert.ok(r.log.custo > 0 && r.log.duracaoMs > 0);
+  assert.match((await executarEncerrar(c, { id: 'a5', chave: 'principal:cccc', idadeMs: 1000 })).erro, /repetido/);
 });
 
 test('encerrar recusa processo que não é do Claude Code', async (t) => {
@@ -198,7 +217,7 @@ test('encerrar recusa processo que não é do Claude Code', async (t) => {
   const dir = montarConta(raiz, '.claude', { sessionId: 'dddd', pid: filho.pid, procStart: inicioDoProcesso(filho.pid), linhas: resposta({}) });
   const c = new Coletor({ dirs: [dir] });
   let chamou = false;
-  const r = await executarEncerrar(c, { chave: 'principal:dddd', idadeMs: 0 }, { kill: () => (chamou = true) });
+  const r = await executarEncerrar(c, { id: 'b1', chave: 'principal:dddd', idadeMs: 0 }, { kill: () => (chamou = true) });
   assert.match(r.erro, /não é do Claude Code/);
   assert.equal(chamou, false);
 });
@@ -269,4 +288,85 @@ test('ideias: falha tenta de novo depois do intervalo, sem a sessão precisar mu
   id.aplicar(ret());
   await new Promise((r) => setImmediate(r));
   assert.equal(chamadas, 2);
+});
+
+test('R1: resposta copiada entre sessões (retomada) conta uma vez, na sessão de origem', async () => {
+  const raiz = tmp();
+  const dir = path.join(raiz, '.claude');
+  const proj = path.join(dir, 'projects', '-home-x-Documentos-projeto-a');
+  fs.mkdirSync(proj, { recursive: true });
+  const antiga = new Date(Date.now() - 3600_000).toISOString();
+  const comum = resposta({ id: 'orig', req: 'orig', ts: antiga });
+  fs.writeFileSync(path.join(proj, 'origem.jsonl'), comum);
+  await new Promise((r) => setTimeout(r, 30)); // a cópia nasce depois
+  fs.writeFileSync(path.join(proj, 'copia.jsonl'), comum + resposta({ id: 'nova', req: 'nova' }));
+  const r = new Coletor({ dirs: [dir] }).retrato();
+  const origem = r.sessoes.find((s) => s.sessionId === 'origem');
+  const copia = r.sessoes.find((s) => s.sessionId === 'copia');
+  assert.ok(Math.abs(origem.custo - 0.024) < 1e-9);
+  assert.ok(Math.abs(copia.custo - 0.024) < 1e-9, `cópia ${copia.custo}`);
+  assert.ok(Math.abs(r.totalDia - 0.048) < 1e-9, `total ${r.totalDia}`);
+});
+
+test('R5: custo só aparece como conferido quando o cost-state bate ou corrigiu', () => {
+  const raiz = tmp();
+  const mk = (id, total) =>
+    montarConta(raiz, `.claude-${id}`, { sessionId: id, linhas: resposta({ id, req: id }) + linha({ type: 'cost-state', totalCostUSD: total, startTime: Date.now() - 7200_000 }) });
+  const dirs = [mk('bate', 0.024), mk('corrige', 0.03), mk('diverge', 0.004)];
+  const r = new Coletor({ dirs }).retrato();
+  const por = Object.fromEntries(r.sessoes.map((s) => [s.sessionId, s]));
+  assert.equal(por.bate.custoConferido, true);
+  assert.equal(por.corrige.custoConferido, true);
+  assert.ok(Math.abs(por.corrige.custo - 0.03) < 1e-9);
+  assert.equal(por.diverge.custoConferido, false);
+});
+
+test('R3: registro órfão com o mesmo sessionId não esconde o registro vivo', () => {
+  const raiz = tmp();
+  const dir = montarConta(raiz, '.claude', { sessionId: 'vivo', pid: process.pid, procStart: inicioDoProcesso(process.pid), linhas: resposta({}) });
+  fs.writeFileSync(path.join(dir, 'sessions', '1.json'), JSON.stringify({ pid: 999999, sessionId: 'vivo', procStart: '1', updatedAt: Date.now() + 10_000, status: 'idle' }));
+  const c = new Coletor({ dirs: [dir] });
+  assert.equal(c.registroDe(dir, 'vivo').pid, process.pid);
+  assert.equal(c.retrato().sessoes[0].status, 'ativa');
+});
+
+test('R2: log de sessão ociosa desde ontem sai completo', async (t) => {
+  const raiz = tmp();
+  const bin = path.join(raiz, 'claude');
+  fs.symlinkSync(process.execPath, bin);
+  const filho = spawn(bin, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  t.after(() => filho.kill('SIGKILL'));
+  await new Promise((r) => setTimeout(r, 200));
+  const ontem = new Date(Date.now() - 30 * 3600_000).toISOString();
+  const dir = montarConta(raiz, '.claude', {
+    sessionId: 'velha',
+    pid: filho.pid,
+    procStart: inicioDoProcesso(filho.pid),
+    status: 'idle',
+    linhas: resposta({ ts: ontem }) + linha({ type: 'ai-title', aiTitle: 'Tarefa de ontem' }),
+  });
+  const proj = path.join(dir, 'projects', '-home-x-Documentos-projeto-a', 'velha.jsonl');
+  const velho = new Date(Date.now() - 30 * 3600_000);
+  fs.utimesSync(proj, velho, velho);
+  const c = new Coletor({ dirs: [dir] });
+  const r = await executarEncerrar(c, { id: 'v1', chave: 'principal:velha', idadeMs: 0 });
+  assert.equal(r.ok, true, r.erro);
+  assert.equal(r.log.projeto, 'projeto-a');
+  assert.equal(r.log.modelo, 'claude-opus-5-5');
+  assert.ok(r.log.custo > 0);
+  assert.match(r.log.nome, /projeto-a – Tarefa de ontem$/);
+});
+
+test('ehClaude não aceita processo que só cita "claude-code" nos argumentos', async (t) => {
+  const filho = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', 'notas-claude-code.md'], { stdio: 'ignore' });
+  t.after(() => filho.kill('SIGKILL'));
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(ehClaude(filho.pid), false);
+});
+
+test('coletor só envia para https (ou servidor local)', () => {
+  assert.equal(urlAceita('https://moises-iota.vercel.app'), true);
+  assert.equal(urlAceita('http://localhost:3800'), true);
+  assert.equal(urlAceita('http://moises-iota.vercel.app'), false);
+  assert.equal(urlAceita('lixo'), false);
 });

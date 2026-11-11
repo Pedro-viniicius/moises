@@ -266,7 +266,7 @@ function montarDetalhe(c) {
   const g1 = el('dl', 'grade');
   linhaGrade(g1, 'Início', dataHora(s.iniciadaEm));
   const fim = s.status === 'encerrada' ? s.ultimaAtividade : Date.now();
-  linhaGrade(g1, 'Duração', duracao(fim - s.iniciadaEm));
+  linhaGrade(g1, 'Duração', dataValida(s.iniciadaEm) && dataValida(fim) ? duracao(fim - s.iniciadaEm) : '—');
   tempo.appendChild(g1);
   nodes.push(tempo);
 
@@ -359,7 +359,7 @@ function abrirConfirmacao(c) {
   const campo = el('input', 'campo');
   campo.id = idCampo;
   campo.type = 'text';
-  campo.maxLength = 200;
+  campo.maxLength = 140;
   campo.value = nomePadrao(c.sessao);
   const botoes = el('div', 'botoes');
   const ok = el('button', 'btn btn-primario', 'Encerrar');
@@ -640,7 +640,7 @@ function criarLog(l) {
     const form = el('form', 'log-linha');
     const campo = el('input', 'campo');
     campo.type = 'text';
-    campo.maxLength = 200;
+    campo.maxLength = 140;
     campo.value = l.nome || '';
     campo.setAttribute('aria-label', 'Novo nome do log');
     const salvar = el('button', 'btn btn-primario', 'Salvar');

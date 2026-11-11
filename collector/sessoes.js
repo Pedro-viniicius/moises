@@ -16,7 +16,7 @@ export function diretoriosDeConfig(home = os.homedir()) {
     .filter((d) => fs.existsSync(path.join(d, 'sessions')) || fs.existsSync(path.join(d, 'projects')));
 }
 
-const nomeConta = (dir) => path.basename(dir).replace(/^\.claude-?/, '') || 'principal';
+export const nomeConta = (dir) => path.basename(dir).replace(/^\.claude-?/, '') || 'principal';
 
 // Início do processo em ticks (campo 22 de /proc/<pid>/stat), o mesmo valor que o Claude grava em procStart.
 export function inicioDoProcesso(pid) {
@@ -29,10 +29,13 @@ export function inicioDoProcesso(pid) {
   }
 }
 
-export function processoConfere(reg) {
+// estrito: exige procStart (usado antes de encerrar); sem ele, basta o pid existir (só para status).
+export function processoConfere(reg, { estrito = false } = {}) {
   if (!reg?.pid) return false;
   const inicio = inicioDoProcesso(reg.pid);
-  return inicio != null && (reg.procStart == null || String(reg.procStart) === inicio);
+  if (inicio == null) return false;
+  if (reg.procStart == null) return !estrito;
+  return String(reg.procStart) === inicio;
 }
 
 function lerRegistros(dir) {
@@ -66,8 +69,9 @@ export function statusDe(reg, vivo, agora = Date.now()) {
 }
 
 export class Coletor {
-  constructor({ dirs = diretoriosDeConfig(), agora = () => Date.now() } = {}) {
+  constructor({ dirs = diretoriosDeConfig(), agora = () => Date.now(), ignorarCwds = [] } = {}) {
     this.dirs = dirs;
+    this.ignorarCwds = ignorarCwds; // ex.: a pasta onde o coletor roda o `claude -p` das ideias
     this.agora = agora;
     this.estados = new Map(); // caminho do arquivo → estado
     this.indice = new Map(); // `${dir}|${sessionId}` → { dir, principal, pastaSessao, mtime }
@@ -97,13 +101,14 @@ export class Coletor {
           if (!a.endsWith('.jsonl')) continue;
           const id = a.slice(0, -6);
           const principal = path.join(pasta, a);
-          let mtime = 0;
+          let st;
           try {
-            mtime = fs.statSync(principal).mtimeMs;
+            st = fs.statSync(principal);
           } catch {
             continue;
           }
-          this.indice.set(`${dir}|${id}`, { dir, id, principal, pastaSessao: path.join(pasta, id), mtime });
+          const nascido = st.birthtimeMs || st.ctimeMs;
+          this.indice.set(`${dir}|${id}`, { dir, id, principal, pastaSessao: path.join(pasta, id), mtime: st.mtimeMs, nascido });
         }
       }
     }
@@ -137,45 +142,43 @@ export class Coletor {
     return { principal, todos: [principal, ...subs], tituloArquivo };
   }
 
-  // Retrato completo: sessões vivas + sessões com atividade hoje.
-  retrato() {
-    const agora = this.agora();
-    const hoje = diaLocal(agora);
-    if (agora - this.indiceEm > 60_000) this.reindexar();
-    const inicioHoje = agora - 26 * 3600 * 1000; // margem para fuso; o filtro real é por dia
+  // Registros de sessão por chave `${dir}|${sessionId}`. Um registro vivo nunca é trocado por um morto.
+  registros() {
     const vivos = new Map();
     for (const dir of this.dirs) {
       for (const reg of lerRegistros(dir)) {
+        if (reg.cwd && this.ignorarCwds.some((c) => reg.cwd === c || reg.cwd.startsWith(c + path.sep))) continue;
         const chave = `${dir}|${reg.sessionId}`;
         const vivo = processoConfere(reg);
         const atual = vivos.get(chave);
-        if (!atual || (vivo && !atual.vivo) || (reg.updatedAt || 0) > (atual.reg.updatedAt || 0)) vivos.set(chave, { reg, vivo, dir });
+        const melhor = !atual || (vivo && !atual.vivo) || (vivo === atual.vivo && (reg.updatedAt || 0) > (atual.reg.updatedAt || 0));
+        if (melhor) vivos.set(chave, { reg, vivo, dir });
       }
     }
-    const chaves = new Set();
-    for (const [k, v] of vivos) if (v.vivo) chaves.add(k);
-    for (const [k, info] of this.indice) if (info.mtime >= inicioHoje) chaves.add(k);
+    return vivos;
+  }
 
-    const sessoes = [];
-    const estadosHoje = [];
-    for (const chave of chaves) {
-      const info = this.indice.get(chave);
-      const viv = vivos.get(chave);
-      const [dir, id] = [chave.slice(0, chave.lastIndexOf('|')), chave.slice(chave.lastIndexOf('|') + 1)];
-      const lido = info ? this.lerSessao(info) : null;
-      const p = lido?.principal;
-      const totalSessao = lido ? somar(lido.todos) : somar([]);
-      const totalHoje = lido ? somar(lido.todos, hoje) : somar([]);
-      // O cost-state do Claude Code inclui chamadas que não vão para o transcript
-      // (títulos, resumos, compactação). Quando ele cobre esta sessão inteira, vale ele.
-      const fator = fatorOficial(p, totalSessao.custo);
-      if (!viv?.vivo && totalHoje.custo === 0 && !(p?.ultimaAtividade && diaLocal(p.ultimaAtividade) === hoje)) continue;
-      if (lido) estadosHoje.push(...lido.todos);
-      const reg = viv?.reg || {};
-      const cwd = reg.cwd || p?.cwd || null;
-      const nome = lido?.tituloArquivo || p?.tituloManual || reg.name || null;
-      const ultima = Math.max(p?.ultimaAtividade || 0, viv?.vivo ? reg.statusUpdatedAt || reg.updatedAt || 0 : 0) || null;
-      sessoes.push({
+  // Monta uma sessão. `vistas` (opcional) são respostas já atribuídas a outra sessão
+  // (retomada ou bifurcação copia o histórico): não entram de novo no custo.
+  montar(chave, viv, agora, hoje, vistas = null) {
+    const info = this.indice.get(chave);
+    const sep = chave.lastIndexOf('|');
+    const [dir, id] = [chave.slice(0, sep), chave.slice(sep + 1)];
+    const lido = info ? this.lerSessao(info) : null;
+    const p = lido?.principal;
+    const totalSessao = somar(lido?.todos || [], null, vistas);
+    const totalHoje = somar(lido?.todos || [], hoje, vistas);
+    // O cost-state do Claude Code inclui chamadas que não vão para o transcript
+    // (títulos, resumos, compactação). Quando ele cobre esta sessão inteira, vale ele.
+    const fator = fatorOficial(p, totalSessao.custo);
+    const oficialBate = !!p?.custoOficial && totalSessao.custo > 0 && Math.abs(p.custoOficial.total / totalSessao.custo - 1) < 0.01;
+    const reg = viv?.reg || {};
+    const cwd = reg.cwd || p?.cwd || null;
+    const nome = lido?.tituloArquivo || p?.tituloManual || reg.name || null;
+    const ultima = Math.max(p?.ultimaAtividade || 0, viv?.vivo ? reg.statusUpdatedAt || reg.updatedAt || 0 : 0) || null;
+    return {
+      lido,
+      sessao: {
         chave: `${nomeConta(dir)}:${id}`,
         sessionId: id,
         conta: nomeConta(dir),
@@ -191,26 +194,84 @@ export class Coletor {
         esforco: p?.esforco || null,
         custo: arred(totalSessao.custo * fator),
         custoHoje: arred(totalHoje.custo * fator),
-        custoConferido: fator !== 1 || !!p?.custoOficial,
+        custoConferido: fator !== 1 || oficialBate,
         tokens: totalSessao.tokens,
         porModelo: arredModelos(totalSessao.porModelo),
-        modelosSemPreco: p ? [...new Set(lido.todos.flatMap((e) => [...e.modelosDesconhecidos]))] : [],
-      });
+        modelosSemPreco: lido ? [...new Set(lido.todos.flatMap((e) => [...e.modelosDesconhecidos]))] : [],
+      },
+      ativaHoje: !!viv?.vivo || totalHoje.custo > 0 || (p?.ultimaAtividade != null && diaLocal(p.ultimaAtividade) === hoje),
+      totalHoje,
+    };
+  }
+
+  // Retrato completo: sessões vivas + sessões com atividade hoje.
+  retrato() {
+    const agora = this.agora();
+    const hoje = diaLocal(agora);
+    if (agora - this.indiceEm > 60_000) this.reindexar();
+    const inicioHoje = agora - 26 * 3600 * 1000; // margem para fuso; o filtro real é por dia
+    const vivos = this.registros();
+    const chaves = new Set();
+    for (const [k, v] of vivos) if (v.vivo) chaves.add(k);
+    for (const [k, info] of this.indice) if (info.mtime >= inicioHoje) chaves.add(k);
+
+    // A resposta fica com a sessão de origem: processa da mais antiga para a mais nova.
+    const ordem = [...chaves].map((k) => {
+      const info = this.indice.get(k);
+      const p = info ? this.lerSessao(info).principal : null;
+      return { k, inicio: p?.primeiraAtividade ?? Infinity, nascido: info?.nascido ?? Infinity };
+    });
+    // Empate (a retomada copia as respostas com os horários originais): vale o arquivo criado antes.
+    ordem.sort((a, b) => a.inicio - b.inicio || a.nascido - b.nascido);
+
+    const vistas = new Set();
+    const sessoes = [];
+    const porModeloDia = {};
+    const usados = new Set();
+    for (const { k } of ordem) {
+      const m = this.montar(k, vivos.get(k), agora, hoje, vistas);
+      for (const est of m.lido?.todos || []) {
+        usados.add(est);
+        for (const chaveResp of est.respostas.keys()) vistas.add(chaveResp);
+      }
+      if (!m.ativaHoje) continue;
+      sessoes.push(m.sessao);
+      for (const [mod, v] of Object.entries(m.totalHoje.porModelo)) {
+        const pm = (porModeloDia[mod] ||= { custo: 0, tokens: 0 });
+        pm.custo += v.custo;
+        pm.tokens += v.tokens;
+      }
     }
+    // Esquece transcripts que saíram da janela, para a memória do serviço não crescer.
+    for (const [caminho, est] of this.estados) if (!usados.has(est)) this.estados.delete(caminho);
+
     sessoes.sort((a, b) => b.custo - a.custo);
-    const dia = somar(estadosHoje, hoje);
     return {
       geradoEm: agora,
       dia: hoje,
       totalDia: arred(sessoes.reduce((t, s) => t + s.custoHoje, 0)),
-      porModeloDia: arredModelos(dia.porModelo),
+      porModeloDia: arredModelos(porModeloDia),
       sessoes,
     };
   }
 
-  // Dados completos de uma sessão para gravar o log ao encerrar.
+  // Uma sessão específica, mesmo sem atividade hoje (para o log ao encerrar).
+  sessaoDe(chavePainel) {
+    const sep = chavePainel.indexOf(':');
+    const conta = chavePainel.slice(0, sep);
+    const id = chavePainel.slice(sep + 1);
+    const dir = this.dirs.find((d) => nomeConta(d) === conta);
+    if (!dir) return null;
+    const agora = this.agora();
+    if (agora - this.indiceEm > 60_000 || !this.indice.has(`${dir}|${id}`)) this.reindexar();
+    const k = `${dir}|${id}`;
+    return this.montar(k, this.registros().get(k), agora, diaLocal(agora)).sessao;
+  }
+
+  // Registro da sessão, preferindo o que tem processo vivo (pode haver órfãos com o mesmo sessionId).
   registroDe(dir, sessionId) {
-    return lerRegistros(dir).find((r) => r.sessionId === sessionId) || null;
+    const regs = lerRegistros(dir).filter((r) => r.sessionId === sessionId);
+    return regs.find((r) => processoConfere(r, { estrito: true })) || regs[0] || null;
   }
 }
 

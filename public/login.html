@@ -10,9 +10,9 @@
 <body>
   <main class="login">
     <h1>Moisés</h1>
-    <form id="form" novalidate>
+    <form id="form" method="post" action="/api/login" novalidate>
       <label for="senha">Senha</label>
-      <input class="campo" id="senha" name="senha" type="password" autocomplete="current-password" required autofocus>
+      <input class="campo" id="senha" type="password" autocomplete="current-password" required autofocus>
       <button class="btn btn-primario" id="entrar" type="submit">Entrar</button>
       <p class="erro" id="erro" role="alert" hidden></p>
     </form>

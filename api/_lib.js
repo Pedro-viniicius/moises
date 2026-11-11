@@ -7,7 +7,6 @@ export const K = {
   cmds: 'moises:cmds',
   logs: 'moises:logs',
   tentativas: (ip) => `moises:login:${ip}`,
-  tentativasTodas: 'moises:login:todas',
 };
 
 const COOKIE = 'moises';
