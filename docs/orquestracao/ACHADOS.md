@@ -74,3 +74,26 @@ Revisores: `seguranca` (CORRIGIR ANTES DO RELEASE, sem crítica nem alta), `revi
 | Q4 | Baixa | Testes deixavam pastas em `/tmp`. | Corrigir. |
 | D8 | Sugestão | O motivo de "Comandos desligados" fica no fim do cartão. | Em aberto (sugestão; segue a decisão D1). |
 | S15-resto, S16-resto | Média | Vercel tomada ainda pode servir conteúdo diferente ao coletor e ao celular; texto das sessões comandadas sem cifra. | Levados ao dono como risco (relatório final). |
+
+## Fase 5: verificação final, `/code-review` e revisão do ramo inteiro
+
+Verificação das correções da rodada 2: `seguranca` (sem crítica nem alta; CORRIGIR ANTES DO RELEASE só pelo aceite do dono em S15-resto e S16-resto), `revisor` (APROVADO COM RESSALVAS), `qa` (APROVADO COM RESSALVAS; 133 de 146 mutantes mortos de saída; dos 13 sobreviventes, 9 morreram com os testes `qa3-*` e 3 foram julgados equivalentes). Spike B9 na sandbox: a regra deny no formato que o orquestrador gera (`Read(//caminho/**)`) **nega** a leitura com o Claude Code instalado; sem a regra, a mesma leitura funciona (controle). Revisão do ramo inteiro (`/superpowers:requesting-code-review`): "pronto com ajustes", nada crítico nem importante. `/code-review` (nível alto): 10 achados, sem verificação independente.
+
+| ID | Gravidade | Achado | Decisão |
+|---|---|---|---|
+| S28-a (= Q5) | Baixa | `coletor.env` com CRLF tinha as linhas ignoradas. | Corrigido (3bb062c). |
+| S28-b | Baixa | Valor estranho em `MOISES_CONFERIR_PAINEL` desligava a conferência (lado inseguro). | Corrigido: valor não reconhecido mantém a conferência ligada. |
+| R10 | Sugestão | Script aceitava `kid` alfanumérico. | Corrigido: regex única hexadecimal. |
+| CR1 | Média | `abrir` respondia "feito" no primeiro evento, antes do `init` conferido. | Corrigir: sucesso só depois do `init` conferido. |
+| CR2 (= RB2) | Média | `interromper` e o `result` tiravam pedidos pendentes sem mandar "negar" ao Claude Code. | Corrigir: deny explícito antes de tirar. |
+| CR3 | Média | Filho que não morre nem com SIGKILL segurava a vaga para sempre. | Corrigir: o registro é finalizado com aviso no log. |
+| CR4 | Baixa | A cota diária não voltava quando o `spawn` falhava. | Corrigir. |
+| CR5 | Baixa | O teto de 20 pendentes no servidor é contado e gravado sem atomicidade. | Em aberto (baixa): o excedente só expira; o porteiro do coletor continua valendo. |
+| CR6 | Baixa | Corpo `null` no ingest dava 500. | Corrigir: 400. |
+| CR7, CR8 | Limpeza | Constantes do contrato duplicadas entre porteiro, orquestrador e servidor. | Corrigir: uma fonte só. |
+| CR9 | Limpeza | Limpeza do cache de pastas em O(n·m) a cada ciclo. | Fica para o `/simplify`. |
+| CR10 | Baixa | Contagem de testes desatualizada no `CLAUDE.md`. | Corrigir no fim. |
+| RB3 | Sugestão | Sessão aberta com worktree pode trocar o nome do projeto no cartão na transição. | Em aberto (visual; sem teste real de worktree). |
+| RB4 | Sugestão | "Sair" apaga a chave do aparelho sem avisar que será preciso autorizar de novo. | Em aberto (texto de interface, para o designer). |
+| RB5 | Baixa | Quem tem só o cookie ocupa as 5 vagas de pedido de pareamento por 1 h. | Em aberto (mesmo padrão do A4; o cookie já é credencial do dono). |
+| — | Baixa (qa) | `MOISES_FERRAMENTAS` toda digitada errado volta às seis padrão. | Registrado: o padrão é a lista conservadora; o aviso fica no log. |
