@@ -9,39 +9,16 @@ import encerrar from '../api/encerrar.js';
 import logs from '../api/logs.js';
 import ingest from '../api/ingest.js';
 
-// ---------- Redis falso (REST do Upstash) ----------
-let db;
-function exec([cmd, ...a]) {
-  const h = (k) => (db.has(k) ? db.get(k) : db.set(k, new Map()).get(k));
-  switch (cmd) {
-    case 'GET': return db.get(a[0]) ?? null;
-    case 'SET': db.set(a[0], a[1]); return 'OK';
-    case 'DEL': return db.delete(a[0]) ? 1 : 0;
-    case 'INCR': { const v = Number(db.get(a[0]) || 0) + 1; db.set(a[0], String(v)); return v; }
-    case 'EXPIRE': return 1;
-    case 'HSET': h(a[0]).set(a[1], a[2]); return 1;
-    case 'HGET': return db.get(a[0])?.get(a[1]) ?? null;
-    case 'HDEL': return db.get(a[0])?.delete(a[1]) ? 1 : 0;
-    case 'HGETALL': return [...(db.get(a[0]) || new Map())].flat();
-    default: throw new Error(`comando não simulado: ${cmd}`);
-  }
-}
-globalThis.fetch = async (url, opts) => {
-  const corpo = JSON.parse(opts.body);
-  const res = String(url).endsWith('/pipeline') ? corpo.map((c) => ({ result: exec(c) })) : { result: exec(corpo) };
-  return { json: async () => res };
-};
+import { instalarRedisFalso } from '../scripts/redis-memoria.js';
+
+const redisFalso = instalarRedisFalso();
 
 const SENHA = 'abcd-efgh-jkmn-pqrs';
-process.env.KV_REST_API_URL = 'https://redis.teste';
-process.env.KV_REST_API_TOKEN = 't';
 process.env.PANEL_PASSWORD_HASH = gerarHashSenha(SENHA);
 process.env.SESSION_SECRET = 'x'.repeat(48);
 process.env.MOISES_TOKEN = 'y'.repeat(43);
 
-beforeEach(() => {
-  db = new Map();
-});
+beforeEach(() => redisFalso.limpar());
 
 async function chamar(handler, { method = 'GET', url = '/', body, headers = {} } = {}) {
   const txt = body === undefined ? '' : JSON.stringify(body);
