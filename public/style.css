@@ -757,6 +757,17 @@ select.campo { appearance: auto; }
   background: currentColor;
 }
 .detalhe .permissao p + p { margin-top: 8px; }
+.erro-sessao {
+  margin: 14px 0 10px;
+  padding: 12px 14px;
+  border: 2px solid var(--permissao-borda);
+  border-radius: var(--raio-p);
+  background: var(--aviso-fundo);
+  color: var(--aviso-texto);
+  overflow-wrap: anywhere;
+}
+.erro-sessao[hidden] { display: none; }
+.erro-sessao strong { display: block; margin-bottom: 4px; }
 .permissao-aviso { color: var(--aviso-texto); font-weight: 600; }
 .permissao-rotulo { font-weight: 600; margin-top: 10px !important; margin-bottom: 4px !important; }
 .entrada {

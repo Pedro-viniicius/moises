@@ -364,3 +364,7 @@ Passos marcados **[conferir no código]** dependem de estado difícil de provoca
 1. **Enviar mensagem durante `trabalhando`.** Decisão confirmada pelo dono: continua desabilitado. Fica registrada aqui só para não ser reaberta sem motivo.
 2. **Aviso de pedido `sensivel`.** A redação do item 4 é minha; vale uma leitura do `seguranca` para ver se o tom (aviso forte, sem botão vermelho) é o certo.
 3. **Aparelho guardado que não está em `orquestracao.aparelhos`** (código revogado no computador). A spec só avisa no rodapé; o coletor recusa os comandos com o motivo `aparelho`. Se o dono preferir que o painel esqueça a chave sozinho nesse caso, é uma linha a mais no `app.js`.
+
+## Erro de sessão que morreu sozinha
+
+Com `sessao.erro` preenchido, o detalhe mostra, antes da linha de ações, `<div class="erro-sessao" role="alert">`: título em negrito "A sessão parou com erro." e, abaixo, o texto de `erro` como veio (por `textContent`). Visual de aviso (`--aviso-fundo`, `--aviso-texto`, borda de 2 px `--permissao-borda`); o título em texto é o sinal, não a cor. Atualizado no lugar a cada consulta: aparece e some com o retrato (o coletor publica por até 10 minutos), sem recriar o cartão nem mexer no foco.

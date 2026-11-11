@@ -580,7 +580,12 @@ function criarOrquestracao(c) {
   c.msg = criarMensagem(c);
   c.and = criarAndamento();
   c.acoes = criarAcoes(c);
-  raiz.append(c.avisoEstado, c.permissoesBox, c.resp.raiz, c.msg.raiz, c.and.raiz, c.acoes.raiz);
+  c.erroSessao = el('div', 'erro-sessao');
+  c.erroSessao.setAttribute('role', 'alert');
+  c.erroSessao.hidden = true;
+  c.erroSessaoTexto = el('span', 'erro-sessao-texto');
+  c.erroSessao.append(el('strong', null, 'A sessão parou com erro.'), c.erroSessaoTexto);
+  raiz.append(c.avisoEstado, c.permissoesBox, c.resp.raiz, c.msg.raiz, c.and.raiz, c.erroSessao, c.acoes.raiz);
   return raiz;
 }
 
@@ -1222,6 +1227,9 @@ function atualizarCartao(c) {
   const nota = devolverMensagens(c);
   atualizarMensagem(c);
   atualizarAndamento(c.and, comandoDe(c.chave), nota);
+  const erroTxt = typeof s.erro === 'string' ? s.erro.trim() : '';
+  if (c.erroSessaoTexto.textContent !== erroTxt) c.erroSessaoTexto.textContent = erroTxt;
+  c.erroSessao.hidden = !erroTxt;
   atualizarAcoes(c);
   if (perdeuFoco) {
     // O pedido respondido sumiu com o foco dentro: vai para o título da última resposta ou para o cartão.
