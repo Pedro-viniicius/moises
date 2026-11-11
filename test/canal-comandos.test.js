@@ -1,0 +1,732 @@
+// Canal de comandos no coletor: chaveiro (chaves por aparelho), porteiro (decide se um comando
+// vindo do painel é aceito) e auditoria local. Tudo em pastas temporárias, com segredos sorteados
+// aqui e relógio injetado: nada lê ~/.config/moises, ~/.local/state/moises nem .env*.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Auditoria } from '../collector/auditoria.js';
+import { Chaveiro, Porteiro, TIPOS, JANELA_MS, FOLGA_FUTURO_MS, GUARDA_IDS_MS } from '../collector/comandos.js';
+import * as col from '../collector/assinatura.js';
+import * as nav from '../public/assinatura.js';
+
+// O ambiente de quem roda os testes não pode desligar o canal por acidente.
+delete process.env.MOISES_COMANDOS;
+
+const T0 = 1_794_387_000_000; // início exato de um minuto
+const SESSAO = 'principal:0123abcd-4567-89ab-cdef-0123456789ab';
+const VISTO = { projeto: 'moises', nome: 'sessão de teste' };
+const MSG_SECRETA = 'TEXTO-DA-MENSAGEM-que-nao-pode-ir-para-a-auditoria';
+const HASH = 'a'.repeat(64);
+
+// A derivação custa 210.000 iterações: um código e as duas chaves dele, uma vez só.
+const codigo = col.gerarCodigo();
+const doNavegador = await nav.derivarChave(codigo);
+const doColetor = col.derivarChave(codigo);
+
+let seq = 0;
+const novoId = () => `c_${(++seq).toString(16).padStart(16, '0')}`;
+
+const aparelho = (kid, rotulo) => ({ kid, rotulo, chave: crypto.randomBytes(32) });
+
+function gravarChaves(arquivo, aparelhos, modo = 0o600) {
+  const json = {};
+  for (const a of aparelhos) json[a.kid] = { rotulo: a.rotulo, chave: a.chave.toString('hex'), criadaEm: new Date(T0).toISOString() };
+  const tmp = `${arquivo}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(json), { mode: modo });
+  fs.chmodSync(tmp, modo);
+  fs.renameSync(tmp, arquivo);
+}
+
+function assinar(chave, cmd) {
+  const assinatura = crypto.createHmac('sha256', chave).update(col.textoDoComando(cmd), 'utf8').digest('base64url');
+  return { ...cmd, assinatura };
+}
+
+// Monta chaveiro, auditoria e porteiro numa pasta temporária apagada no fim do teste.
+function montar(t, { aparelhos, maxPorMinuto, maxRecusasPorMinuto, auditoriaArq, semChaves = false } = {}) {
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const conf = path.join(raiz, 'conf');
+  const estado = path.join(raiz, 'estado');
+  fs.mkdirSync(conf, { mode: 0o700 });
+  fs.mkdirSync(estado, { mode: 0o700 });
+  const chavesArq = path.join(conf, 'chaves-comandos.json');
+  const aps = aparelhos ?? [aparelho('ab2cd3', 'celular'), aparelho('xy7zw8', 'tablet')];
+  if (!semChaves) gravarChaves(chavesArq, aps);
+  const relogio = { agora: T0 };
+  const agora = () => relogio.agora;
+  const audArq = auditoriaArq ?? path.join(estado, 'auditoria.jsonl');
+  const chaveiro = new Chaveiro({ arquivo: chavesArq });
+  const auditoria = new Auditoria({ arquivo: audArq, agora, maxRecusasPorMinuto });
+  const novoPorteiro = () => new Porteiro({ chaveiro, pastaEstado: estado, auditoria, agora, maxPorMinuto });
+  const porteiro = novoPorteiro();
+  // Comando de mensagem válido, assinado pelo primeiro aparelho; `campos` substitui antes de assinar.
+  const comando = (campos = {}, ap = aps[0]) =>
+    assinar(ap.chave, {
+      v: 1, kid: ap.kid, id: novoId(), tipo: 'mensagem', chave: SESSAO, criadoEm: relogio.agora,
+      dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO }), ...campos,
+    });
+  const linhas = () =>
+    fs.existsSync(audArq) ? fs.readFileSync(audArq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  return { raiz, conf, estado, chavesArq, audArq, aps, relogio, chaveiro, auditoria, porteiro, novoPorteiro, comando, linhas };
+}
+
+const motivo = (r) => (r.ok ? 'aceito' : r.motivo);
+const vistosEm = (estado) => JSON.parse(fs.readFileSync(path.join(estado, 'comandos-vistos.json'), 'utf8'));
+const semProto = (o) => Object.assign(Object.create(null), o);
+
+test('constantes do contrato', () => {
+  assert.deepEqual([...TIPOS], ['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
+  assert.equal(JANELA_MS, 120_000);
+  assert.equal(FOLGA_FUTURO_MS, 30_000);
+  assert.equal(GUARDA_IDS_MS, 600_000);
+});
+
+test('recusa comando sem credencial', (t) => {
+  const m = montar(t);
+  const { assinatura, ...sem } = m.comando();
+  for (const cmd of [sem, { ...sem, assinatura: '' }, { ...sem, assinatura: null }, null, undefined, 'texto']) {
+    const r = m.porteiro.conferir(cmd);
+    assert.equal(r.ok, false);
+    assert.equal(r.motivo, 'sem_credencial');
+    assert.equal(typeof r.erro, 'string');
+  }
+  assert.equal(assinatura.length, 43);
+  // Sem credencial, o id nem entra no conjunto de vistos.
+  assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
+});
+
+test('recusa assinatura feita com outra chave', (t) => {
+  const m = montar(t);
+  const outra = crypto.randomBytes(32);
+  const cmd = assinar(outra, { ...m.comando(), assinatura: undefined });
+  const r = m.porteiro.conferir(cmd);
+  assert.deepEqual([r.ok, r.motivo], [false, 'assinatura']);
+  // Assinatura do aparelho certo, mas de outro texto (dados trocados depois de assinar).
+  const trocado = { ...m.comando(), dados: JSON.stringify({ texto: 'outro', visto: VISTO }) };
+  assert.equal(motivo(m.porteiro.conferir(trocado)), 'assinatura');
+  // Assinatura de um aparelho válido, mas com o kid de outro aparelho autorizado.
+  const cruzado = { ...m.comando({}, m.aps[1]), kid: m.aps[0].kid };
+  assert.equal(motivo(m.porteiro.conferir(cruzado)), 'assinatura');
+});
+
+test('recusa aparelho desconhecido', (t) => {
+  const m = montar(t);
+  const estranho = aparelho('zzzzzz', 'estranho');
+  const r = m.porteiro.conferir(m.comando({}, estranho));
+  assert.equal(r.ok, false);
+  assert.equal(r.motivo, 'aparelho');
+  assert.equal(r.erro, 'Este aparelho não está autorizado neste computador.');
+});
+
+test('recusa versão desconhecida', (t) => {
+  const m = montar(t);
+  for (const v of [2, 0, '1', null, undefined, 1.5]) {
+    assert.equal(motivo(m.porteiro.conferir(m.comando({ v }))), 'formato', `v = ${String(v)}`);
+  }
+  const { v, ...semV } = m.comando();
+  assert.equal(v, 1);
+  assert.equal(motivo(m.porteiro.conferir(semV)), 'formato');
+});
+
+test('recusa comando expirado (criado há 120 s)', (t) => {
+  const m = montar(t);
+  const velho = m.comando({ criadoEm: T0 - JANELA_MS });
+  const r = m.porteiro.conferir(velho);
+  assert.deepEqual([r.ok, r.motivo], [false, 'expirado']);
+  // Um milissegundo antes do limite ainda vale.
+  assert.equal(motivo(m.porteiro.conferir(m.comando({ criadoEm: T0 - JANELA_MS + 1 }))), 'aceito');
+  // O mesmo comando, avaliado mais tarde pelo relógio do coletor, também expira.
+  const agoraValido = m.comando();
+  m.relogio.agora = T0 + JANELA_MS;
+  assert.equal(motivo(m.porteiro.conferir(agoraValido)), 'expirado');
+});
+
+test('recusa comando com data 31 s no futuro e diz que é o relógio', (t) => {
+  const m = montar(t);
+  const adiantado = m.comando({ criadoEm: T0 + 31_000 });
+  const r = m.porteiro.conferir(adiantado);
+  assert.equal(r.ok, false);
+  assert.equal(r.motivo, 'relogio');
+  assert.equal(r.erro, 'O relógio do aparelho está adiantado; acerte a hora e tente de novo.');
+  // 30 s no futuro ainda é tolerado.
+  assert.equal(motivo(m.porteiro.conferir(m.comando({ criadoEm: T0 + FOLGA_FUTURO_MS }))), 'aceito');
+  // O comando recusado pelo relógio não pode ser reenviado mais tarde, quando já caberia na folga.
+  m.relogio.agora = T0 + 5_000;
+  assert.equal(motivo(m.porteiro.conferir(adiantado)), 'repetido');
+});
+
+test('aceita uma vez e recusa o mesmo comando repetido', async (t) => {
+  const m = montar(t, { aparelhos: [{ kid: doColetor.kid, rotulo: 'celular do dono', chave: doColetor.chave }] });
+  // Comando assinado de verdade pelo módulo do navegador, com a chave derivada do mesmo código.
+  const cmd = await nav.assinarComando(doNavegador, { tipo: 'mensagem', chave: SESSAO, dados: { texto: 'oi', visto: VISTO } }, T0);
+  const r = m.porteiro.conferir(cmd);
+  assert.equal(r.ok, true);
+  assert.equal(r.quem, `${doColetor.kid} (celular do dono)`);
+  assert.deepEqual(r.dados, semProto({ texto: 'oi', visto: semProto(VISTO) }));
+  // O id foi gravado em disco antes de conferir devolver ok.
+  assert.deepEqual(vistosEm(m.estado), { [cmd.id]: T0 });
+  const st = fs.statSync(path.join(m.estado, 'comandos-vistos.json'));
+  assert.equal(st.mode & 0o777, 0o600);
+
+  const de_novo = m.porteiro.conferir(cmd);
+  assert.deepEqual([de_novo.ok, de_novo.motivo], [false, 'repetido']);
+  // Uma cópia idêntica, chegando segundos depois, também.
+  m.relogio.agora = T0 + 10_000;
+  assert.equal(motivo(m.porteiro.conferir(structuredClone(cmd))), 'repetido');
+});
+
+test('a repetição é recusada mesmo depois de reiniciar o porteiro', (t) => {
+  const m = montar(t);
+  const cmd = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(cmd)), 'aceito');
+  const reiniciado = m.novoPorteiro();
+  m.relogio.agora = T0 + 1_000;
+  assert.equal(motivo(reiniciado.conferir(cmd)), 'repetido');
+  // Também com chaveiro e auditoria novos, como num reinício do serviço.
+  const chaveiro = new Chaveiro({ arquivo: m.chavesArq });
+  const auditoria = new Auditoria({ arquivo: m.audArq, agora: () => m.relogio.agora });
+  const outro = new Porteiro({ chaveiro, pastaEstado: m.estado, auditoria, agora: () => m.relogio.agora });
+  assert.equal(motivo(outro.conferir(cmd)), 'repetido');
+});
+
+test('300 comandos lixo sem assinatura válida não fazem um comando já executado ser aceito de novo', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  const executado = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(executado)), 'aceito');
+  const lixo = [];
+  for (let i = 0; i < 300; i++) {
+    const base = m.comando();
+    const variantes = [
+      { ...base, assinatura: 'A'.repeat(43) }, // assinatura que não confere, id novo
+      { ...base, id: executado.id, assinatura: 'B'.repeat(43) }, // o mesmo id do executado, assinatura errada
+      { ...base, kid: 'qqqqqq' }, // aparelho desconhecido
+      { ...base, id: `x_${i}` }, // id fora do formato
+      (({ assinatura, ...s }) => s)(base), // sem assinatura
+    ];
+    lixo.push(variantes[i % variantes.length]);
+  }
+  for (const c of lixo) {
+    const r = m.porteiro.conferir(c);
+    assert.equal(r.ok, false);
+    assert.notEqual(r.motivo, 'ritmo', 'lixo não gasta o limite por minuto');
+  }
+  // Só o comando executado está guardado: o lixo não entra nem empurra ninguém para fora.
+  assert.deepEqual(Object.keys(vistosEm(m.estado)), [executado.id]);
+  assert.equal(motivo(m.porteiro.conferir(executado)), 'repetido');
+  m.relogio.agora = T0 + 60_000;
+  assert.equal(motivo(m.novoPorteiro().conferir(executado)), 'repetido');
+});
+
+test('se o arquivo de vistos não puder ser gravado, o comando é recusado', (t) => {
+  if (process.getuid?.() === 0) return t.skip('root ignora a permissão da pasta');
+  t.mock.method(console, 'error', () => {});
+  const fora = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-aud-'));
+  t.after(() => fs.rmSync(fora, { recursive: true, force: true }));
+  const m = montar(t, { auditoriaArq: path.join(fora, 'auditoria.jsonl') });
+  fs.chmodSync(m.estado, 0o500);
+  try {
+    const cmd = m.comando();
+    const r = m.porteiro.conferir(cmd);
+    assert.equal(r.ok, false);
+    assert.equal(r.motivo, 'interno');
+    assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
+    // Falha fechada: o mesmo comando não passa nem na segunda tentativa.
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'repetido');
+    const [ultima] = m.linhas().slice(-2);
+    assert.equal(ultima.decisao, 'recusado');
+    assert.equal(ultima.motivo, 'interno');
+  } finally {
+    fs.chmodSync(m.estado, 0o700);
+  }
+  // Com a pasta gravável de novo, um comando novo passa.
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+});
+
+test('recusa verbo desconhecido mesmo com assinatura válida', (t) => {
+  const m = montar(t);
+  for (const tipo of ['apagar', 'executar', 'Mensagem', 'constructor', '__proto__']) {
+    const cmd = m.comando({ tipo });
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'verbo', tipo);
+  }
+  for (const tipo of [undefined, null, 7, '', 'x'.repeat(200)]) {
+    assert.equal(motivo(m.porteiro.conferir(m.comando({ tipo }))), 'formato', String(tipo));
+  }
+});
+
+test('recusa tudo sem chave configurada', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const m = montar(t, { semChaves: true });
+  const estranho = aparelho('ab2cd3', 'x');
+  const valido = m.comando({}, estranho);
+  // Arquivo ausente.
+  assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'sem_chave' });
+  assert.deepEqual(m.chaveiro.aparelhos(), []);
+  assert.equal(motivo(m.porteiro.conferir(valido)), 'sem_chave');
+  assert.equal(motivo(m.porteiro.conferir({})), 'sem_chave');
+  // JSON inválido, objeto vazio, lista e entradas fora do formato: nenhuma chave.
+  const conteudos = [
+    '{nao é json',
+    '{}',
+    '[]',
+    JSON.stringify({ AB2CD3: { rotulo: 'maiúsculo', chave: 'a'.repeat(64) } }),
+    JSON.stringify({ ab2cd: { rotulo: 'kid curto', chave: 'a'.repeat(64) } }),
+    JSON.stringify({ ab2cd3: { rotulo: 'chave curta', chave: 'a'.repeat(63) } }),
+    JSON.stringify({ ab2cd3: { rotulo: 'chave maiúscula', chave: 'A'.repeat(64) } }),
+    JSON.stringify({ ab2cd3: 'sem objeto' }),
+    JSON.stringify({ __proto__: null, ab2cd3: null }),
+  ];
+  for (const c of conteudos) {
+    fs.writeFileSync(m.chavesArq, c, { mode: 0o600 });
+    assert.deepEqual(m.chaveiro.aparelhos(), [], c);
+    assert.equal(motivo(m.porteiro.conferir(m.comando({}, estranho))), 'sem_chave', c);
+  }
+  assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
+});
+
+test('ignora arquivo de chaves com permissão 644', (t) => {
+  const avisos = t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  fs.chmodSync(m.chavesArq, 0o644);
+  assert.deepEqual(m.chaveiro.aparelhos(), []);
+  assert.equal(m.chaveiro.obter(m.aps[0].kid), null);
+  assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'sem_chave' });
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'sem_chave');
+  // Um aviso, sem conteúdo do arquivo.
+  assert.ok(avisos.mock.callCount() >= 1);
+  const texto = avisos.mock.calls.map((c) => c.arguments.map(String).join(' ')).join('\n');
+  for (const a of m.aps) {
+    assert.ok(!texto.includes(a.chave.toString('hex')));
+    assert.ok(!texto.includes(a.rotulo));
+  }
+  // Permissão 640 também é aberta demais.
+  fs.chmodSync(m.chavesArq, 0o640);
+  assert.deepEqual(m.chaveiro.aparelhos(), []);
+  // Voltando a 600, as chaves valem sem reiniciar.
+  fs.chmodSync(m.chavesArq, 0o600);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }, { kid: 'xy7zw8', rotulo: 'tablet' }]);
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+});
+
+test('recusa tudo com MOISES_COMANDOS=0', (t) => {
+  const m = montar(t);
+  process.env.MOISES_COMANDOS = '0';
+  try {
+    assert.deepEqual(m.porteiro.ativo(), { ativa: false, motivo: 'desligado' });
+    const cmd = m.comando();
+    const r = m.porteiro.conferir(cmd);
+    assert.deepEqual([r.ok, r.motivo], [false, 'desligado']);
+    assert.equal(motivo(m.porteiro.conferir({})), 'desligado');
+    assert.equal(fs.existsSync(path.join(m.estado, 'comandos-vistos.json')), false);
+    // Religado, o mesmo comando passa: a recusa por desligado não o queimou.
+    process.env.MOISES_COMANDOS = '1';
+    assert.deepEqual(m.porteiro.ativo(), { ativa: true, motivo: null });
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'aceito');
+  } finally {
+    delete process.env.MOISES_COMANDOS;
+  }
+});
+
+test('recusa dados fora da tabela do verbo', (t) => {
+  const m = montar(t, { maxPorMinuto: 1000 });
+  const abrir = { projeto: 'moises', pedido: 'faça a tarefa' };
+  const casos = [
+    ['abrir', null, { ...abrir, extra: 1 }, 'campo extra'],
+    ['abrir', null, { ...abrir, pedido: '' }, 'pedido vazio'],
+    ['abrir', null, { ...abrir, modoPermissao: 'bypassPermissions' }, 'modo bypass'],
+    ['abrir', null, { ...abrir, nome: '-x' }, 'nome começando com -'],
+    ['abrir', null, { ...abrir, worktree: 'x' }, 'worktree não booleano'],
+    ['mensagem', SESSAO, { texto: 'oi' }, 'mensagem sem visto'],
+    ['permissao', SESSAO, { pedido: 'req_1', decisao: 'aprovar', visto: VISTO }, 'aprovar sem vistoHash'],
+    ['mensagem', SESSAO, '{"__proto__":{"admin":true},"texto":"oi","visto":{"projeto":"moises","nome":null}}', 'dados com __proto__'],
+    ['mensagem', SESSAO, '{"texto":"oi","visto":{"__proto__":{},"projeto":"moises","nome":null}}', 'visto com __proto__'],
+    // Outros cantos da tabela.
+    ['abrir', null, { pedido: 'x' }, 'abrir sem projeto'],
+    ['abrir', null, { ...abrir, projeto: '../etc' }, 'projeto com barra'],
+    ['abrir', null, { ...abrir, pedido: 'x'.repeat(6001) }, 'pedido longo'],
+    ['abrir', null, { ...abrir, modelo: 'gpt' }, 'modelo fora da lista'],
+    ['abrir', null, { ...abrir, esforco: 'ultra' }, 'esforço fora da lista'],
+    ['abrir', null, { ...abrir, conta: '../x' }, 'conta fora do formato'],
+    ['abrir', null, { ...abrir, nome: 'a'.repeat(61) }, 'nome longo'],
+    ['mensagem', SESSAO, { texto: '', visto: VISTO }, 'texto vazio'],
+    ['mensagem', SESSAO, { texto: 'x'.repeat(6001), visto: VISTO }, 'texto longo'],
+    ['mensagem', SESSAO, { texto: 7, visto: VISTO }, 'texto não string'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: { ...VISTO, extra: 1 } }, 'visto com campo extra'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: { projeto: 'moises' } }, 'visto sem nome'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: { projeto: 'moises', nome: 3 } }, 'visto.nome número'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: { projeto: 'x'.repeat(201), nome: null } }, 'visto.projeto longo'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: [] }, 'visto lista'],
+    ['mensagem', SESSAO, { texto: 'oi', visto: null }, 'visto nulo'],
+    ['permissao', SESSAO, { pedido: 'req 1', decisao: 'negar', visto: VISTO }, 'pedido com espaço'],
+    ['permissao', SESSAO, { pedido: 'req_1', decisao: 'talvez', visto: VISTO }, 'decisão desconhecida'],
+    ['permissao', SESSAO, { pedido: 'req_1', decisao: 'aprovar', vistoHash: 'A'.repeat(64), visto: VISTO }, 'vistoHash maiúsculo'],
+    ['permissao', SESSAO, { pedido: 'req_1', decisao: 'aprovar', vistoHash: HASH.slice(1), visto: VISTO }, 'vistoHash curto'],
+    ['interromper', SESSAO, {}, 'interromper sem visto'],
+    ['interromper', SESSAO, { visto: VISTO, texto: 'x' }, 'interromper com campo extra'],
+    ['encerrar', SESSAO, { nome: 'x'.repeat(141), visto: VISTO }, 'nome do log longo'],
+    ['retomar', SESSAO, { modoPermissao: 'bypassPermissions', visto: VISTO }, 'retomar com bypass'],
+    ['retomar', SESSAO, { visto: VISTO, pedido: 'x' }, 'retomar com campo extra'],
+    ['mensagem', SESSAO, 'não é json', 'dados não JSON'],
+    ['mensagem', SESSAO, '[]', 'dados lista'],
+    ['mensagem', SESSAO, 'null', 'dados nulo'],
+    ['mensagem', SESSAO, '"texto"', 'dados string'],
+  ];
+  for (const [tipo, chave, dados, rotulo] of casos) {
+    const cmd = m.comando({ tipo, chave, dados: typeof dados === 'string' ? dados : JSON.stringify(dados) });
+    const r = m.porteiro.conferir(cmd);
+    assert.deepEqual([r.ok, r.motivo], [false, 'formato'], rotulo);
+  }
+  // `dados` grande demais é recusado antes da assinatura.
+  const grande = m.comando({ dados: JSON.stringify({ texto: 'x'.repeat(8000), visto: VISTO }) });
+  assert.equal(motivo(m.porteiro.conferir(grande)), 'formato');
+  assert.equal(motivo(m.porteiro.conferir(m.comando({ dados: { texto: 'oi', visto: VISTO } }))), 'formato');
+});
+
+test('aceita dados válidos de cada verbo e devolve um objeto novo, sem protótipo, só com os campos da tabela', (t) => {
+  const m = montar(t);
+  const casos = [
+    ['abrir', null, { projeto: 'moises', pedido: 'faça a tarefa' }],
+    ['abrir', null, { projeto: 'm.o-i_s3', pedido: 'p', conta: 'trabalho', modelo: 'opus', esforco: 'xhigh', modoPermissao: 'plan', worktree: true, nome: 'moises-teste-1' }],
+    ['mensagem', SESSAO, { texto: 'oi\ncom quebra', visto: { projeto: 'moises', nome: null } }],
+    ['permissao', SESSAO, { pedido: 'req_1:a.b-c', decisao: 'aprovar', vistoHash: HASH, visto: VISTO }],
+    ['permissao', SESSAO, { pedido: 'req_2', decisao: 'negar', visto: VISTO }],
+    ['interromper', SESSAO, { visto: VISTO }],
+    ['encerrar', SESSAO, { visto: VISTO }],
+    ['encerrar', SESSAO, { nome: 'log do dia', visto: VISTO }],
+    ['retomar', SESSAO, { visto: VISTO }],
+    ['retomar', SESSAO, { modoPermissao: 'acceptEdits', modelo: 'sonnet', esforco: 'low', visto: VISTO }],
+  ];
+  for (const [tipo, chave, dados] of casos) {
+    const r = m.porteiro.conferir(m.comando({ tipo, chave, dados: JSON.stringify(dados) }));
+    assert.equal(r.ok, true, `${tipo} ${JSON.stringify(dados)}`);
+    assert.equal(Object.getPrototypeOf(r.dados), null);
+    if (dados.visto) assert.equal(Object.getPrototypeOf(r.dados.visto), null);
+    assert.deepEqual(JSON.parse(JSON.stringify(r.dados)), dados);
+  }
+});
+
+test('formato é conferido antes da assinatura, inclusive a chave de sessão de cada verbo', (t) => {
+  const m = montar(t);
+  // chave '' e null assinam igual: a regra por verbo tem de recusar antes.
+  const casos = [
+    { tipo: 'abrir', chave: '', dados: JSON.stringify({ projeto: 'moises', pedido: 'x' }) },
+    { tipo: 'abrir', chave: SESSAO, dados: JSON.stringify({ projeto: 'moises', pedido: 'x' }) },
+    { tipo: 'mensagem', chave: null },
+    { tipo: 'mensagem', chave: '' },
+    { tipo: 'mensagem', chave: undefined },
+    { tipo: 'mensagem', chave: 'principal:nao-e-uuid' },
+    { tipo: 'mensagem', chave: 'Principal:0123abcd-4567-89ab-cdef-0123456789ab' },
+    { id: 'c_0123' },
+    { id: 'c_0123456789ABCDEF' },
+    { kid: 'AB2CD3' },
+    { criadoEm: 1.5 },
+    { criadoEm: String(T0) },
+    { dados: { texto: 'oi' } },
+  ];
+  for (const campos of casos) {
+    const cmd = m.comando(campos);
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'formato', JSON.stringify(campos));
+    // Com assinatura errada, continua sendo formato: a ordem não depende da chave.
+    assert.equal(motivo(m.porteiro.conferir({ ...cmd, assinatura: 'Z'.repeat(43) })), 'formato');
+  }
+  assert.equal(motivo(m.porteiro.conferir({ ...m.comando(), assinatura: 'curta' })), 'formato');
+  assert.equal(motivo(m.porteiro.conferir({ ...m.comando(), assinatura: 42 })), 'formato');
+});
+
+test('o limite por minuto conta só comandos com assinatura válida', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const m = montar(t);
+  for (let i = 0; i < 100; i++) {
+    const cmd = { ...m.comando(), assinatura: crypto.randomBytes(32).toString('base64url') };
+    assert.equal(motivo(m.porteiro.conferir(cmd)), 'assinatura');
+  }
+  for (let i = 0; i < 20; i++) assert.equal(motivo(m.porteiro.conferir(m.comando({ v: 2 }))), 'formato');
+  for (let i = 0; i < 30; i++) assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito', `válido nº ${i + 1}`);
+});
+
+test('recusa o 31º comando válido no mesmo minuto', (t) => {
+  const m = montar(t);
+  for (let i = 0; i < 30; i++) {
+    m.relogio.agora = T0 + i * 1_000;
+    assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  }
+  m.relogio.agora = T0 + 59_000;
+  const trigesimoPrimeiro = m.comando();
+  const r = m.porteiro.conferir(trigesimoPrimeiro);
+  assert.deepEqual([r.ok, r.motivo], [false, 'ritmo']);
+  // Um minuto depois do primeiro, abre uma vaga.
+  m.relogio.agora = T0 + 60_000;
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'ritmo');
+  // O comando recusado pelo ritmo não pode ser reenviado depois por quem guardou a cópia.
+  m.relogio.agora = T0 + 90_000;
+  assert.equal(motivo(m.porteiro.conferir(trigesimoPrimeiro)), 'repetido');
+  // Com o limite configurado menor, vale o configurado.
+  const n = montar(t, { maxPorMinuto: 2 });
+  assert.equal(motivo(n.porteiro.conferir(n.comando())), 'aceito');
+  assert.equal(motivo(n.porteiro.conferir(n.comando())), 'aceito');
+  assert.equal(motivo(n.porteiro.conferir(n.comando())), 'ritmo');
+});
+
+test('revogar um aparelho no arquivo passa a valer sem reiniciar', (t) => {
+  const m = montar(t);
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aceito');
+  assert.equal(m.chaveiro.obter('xy7zw8').rotulo, 'tablet');
+  // Revoga o tablet, como o configurar-comandos faz (temporário e rename).
+  gravarChaves(m.chavesArq, [m.aps[0]]);
+  assert.equal(m.chaveiro.obter('xy7zw8'), null);
+  assert.deepEqual(m.chaveiro.aparelhos(), [{ kid: 'ab2cd3', rotulo: 'celular' }]);
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, m.aps[1]))), 'aparelho');
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  // Trocar a chave de um aparelho sem mudar o tamanho do arquivo também vale (gravação no mesmo arquivo).
+  const nova = { ...m.aps[0], chave: crypto.randomBytes(32) };
+  const json = JSON.parse(fs.readFileSync(m.chavesArq, 'utf8'));
+  json.ab2cd3.chave = nova.chave.toString('hex');
+  fs.writeFileSync(m.chavesArq, JSON.stringify(json));
+  // Data explícita: em kernel sem carimbo de tempo fino, duas gravações seguidas podem ter o mesmo mtime.
+  fs.utimesSync(m.chavesArq, new Date(T0 + 1_000), new Date(T0 + 1_000));
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'assinatura');
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, nova))), 'aceito');
+  // Apagar o arquivo desliga tudo.
+  fs.rmSync(m.chavesArq);
+  assert.equal(motivo(m.porteiro.conferir(m.comando({}, nova))), 'sem_chave');
+});
+
+test('cada comando aceito fica na auditoria com quem, quando, sessão, verbo e decisão', (t) => {
+  const m = montar(t);
+  m.relogio.agora = T0 + 1_234;
+  const cmd = m.comando();
+  assert.equal(m.porteiro.conferir(cmd).ok, true);
+  const abrir = m.comando({ tipo: 'abrir', chave: null, dados: JSON.stringify({ projeto: 'moises', pedido: MSG_SECRETA }) }, m.aps[1]);
+  assert.equal(m.porteiro.conferir(abrir).ok, true);
+  const [l1, l2] = m.linhas();
+  assert.deepEqual(l1, {
+    em: new Date(T0 + 1_234).toISOString(), id: cmd.id, tipo: 'mensagem', sessao: SESSAO,
+    quem: 'ab2cd3 (celular)', decisao: 'aceito', motivo: null, resultado: null,
+  });
+  assert.deepEqual(l2, {
+    em: new Date(T0 + 1_234).toISOString(), id: abrir.id, tipo: 'abrir', sessao: null,
+    quem: 'xy7zw8 (tablet)', decisao: 'aceito', motivo: null, resultado: null,
+  });
+});
+
+test('cada recusa fica na auditoria com o motivo', (t) => {
+  const m = montar(t);
+  const casos = [
+    [(({ assinatura, ...s }) => s)(m.comando()), 'sem_credencial'],
+    [m.comando({ v: 2 }), 'formato'],
+    [m.comando({ tipo: 'apagar' }), 'verbo'],
+    [m.comando({}, aparelho('qqqqqq', 'x')), 'aparelho'],
+    [{ ...m.comando(), assinatura: 'A'.repeat(43) }, 'assinatura'],
+    [m.comando({ criadoEm: T0 - JANELA_MS }), 'expirado'],
+    [m.comando({ criadoEm: T0 + 31_000 }), 'relogio'],
+    [m.comando({ dados: '[]' }), 'formato'],
+  ];
+  for (const [cmd, esperado] of casos) assert.equal(motivo(m.porteiro.conferir(cmd)), esperado);
+  const linhas = m.linhas();
+  assert.equal(linhas.length, casos.length);
+  linhas.forEach((l, i) => {
+    assert.equal(l.decisao, 'recusado');
+    assert.equal(l.motivo, casos[i][1]);
+    assert.equal(l.id, casos[i][0].id);
+    assert.equal(l.tipo, casos[i][0].tipo);
+    assert.equal(l.em, new Date(T0).toISOString());
+  });
+  // Antes da assinatura conferir, `quem` é só o kid que o comando diz ter; depois, kid e rótulo.
+  assert.equal(linhas[4].quem, 'ab2cd3');
+  assert.equal(linhas[6].quem, 'ab2cd3 (celular)');
+  // Comando que nem é objeto também deixa linha, sem lançar.
+  m.porteiro.conferir(null);
+  assert.deepEqual(
+    (({ em, ...resto }) => resto)(m.linhas().at(-1)),
+    { id: null, tipo: null, sessao: null, quem: null, decisao: 'recusado', motivo: 'sem_credencial', resultado: null },
+  );
+  // Repetido e ritmo também.
+  const n = montar(t, { maxPorMinuto: 1 });
+  const um = n.comando();
+  n.porteiro.conferir(um);
+  n.porteiro.conferir(um);
+  n.porteiro.conferir(n.comando());
+  assert.deepEqual(n.linhas().map((l) => l.motivo), [null, 'repetido', 'ritmo']);
+});
+
+test('a auditoria não contém o texto da mensagem', (t) => {
+  const m = montar(t);
+  const aceito = m.comando();
+  m.porteiro.conferir(aceito);
+  m.porteiro.concluir(aceito, { ok: true });
+  m.porteiro.conferir(m.comando({ tipo: 'abrir', chave: null, dados: JSON.stringify({ projeto: 'moises', pedido: MSG_SECRETA }) }));
+  m.porteiro.conferir(m.comando({ dados: JSON.stringify({ texto: MSG_SECRETA, visto: VISTO, extra: 1 }) }));
+  m.porteiro.conferir({ ...m.comando(), assinatura: 'A'.repeat(43) });
+  const bruto = fs.readFileSync(m.audArq, 'utf8');
+  assert.equal(m.linhas().length, 5);
+  assert.ok(!bruto.includes(MSG_SECRETA));
+  assert.ok(!bruto.includes('"dados"'));
+  assert.ok(!bruto.includes(aceito.assinatura));
+  for (const a of m.aps) assert.ok(!bruto.includes(a.chave.toString('hex')));
+  for (const l of m.linhas()) {
+    assert.deepEqual(Object.keys(l), ['em', 'id', 'tipo', 'sessao', 'quem', 'decisao', 'motivo', 'resultado']);
+  }
+  // Texto que vai para a auditoria perde controles e é cortado em 80 caracteres.
+  m.auditoria.registrar({ id: `c_\u0000\u001b[31m${'x'.repeat(200)}`, tipo: 'men\nsagem' + String.fromCodePoint(0x202e), chave: 7, quem: 'kid (rótulo\r\n falso)', decisao: 'falhou', resultado: 'y'.repeat(300) });
+  const l = m.linhas().at(-1);
+  assert.equal(l.id.length, 80);
+  assert.ok(l.id.startsWith('c_[31mxxx'));
+  assert.equal(l.tipo, 'mensagem');
+  assert.equal(l.sessao, '7');
+  assert.equal(l.quem, 'kid (rótulo falso)');
+  assert.equal(l.resultado, 'y'.repeat(80));
+  assert.equal(fs.readFileSync(m.audArq, 'utf8').split('\n').filter(Boolean).length, 6);
+});
+
+test('o arquivo de auditoria tem permissão 600', (t) => {
+  const m = montar(t);
+  m.porteiro.conferir(m.comando());
+  assert.equal(fs.statSync(m.audArq).mode & 0o777, 0o600);
+  // Mesmo com umask permissiva e com um arquivo antigo aberto demais.
+  const antiga = process.umask(0);
+  try {
+    const arq = path.join(m.raiz, 'outra', 'auditoria.jsonl');
+    const aud = new Auditoria({ arquivo: arq, agora: () => T0 });
+    aud.registrar({ id: 'c_1', tipo: 'mensagem', chave: null, quem: 'k', decisao: 'aceito' });
+    assert.equal(fs.statSync(arq).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(arq)).mode & 0o077, 0);
+    fs.chmodSync(arq, 0o644);
+    aud.registrar({ id: 'c_2', tipo: 'mensagem', chave: null, quem: 'k', decisao: 'aceito' });
+    assert.equal(fs.statSync(arq).mode & 0o777, 0o600);
+  } finally {
+    process.umask(antiga);
+  }
+});
+
+test('concluir registra feito ou falhou', (t) => {
+  const m = montar(t);
+  const a = m.comando();
+  const b = m.comando({ tipo: 'interromper', dados: JSON.stringify({ visto: VISTO }) }, m.aps[1]);
+  m.porteiro.conferir(a);
+  m.porteiro.conferir(b);
+  m.relogio.agora = T0 + 5_000;
+  m.porteiro.concluir(a, { ok: true });
+  m.porteiro.concluir(b, { ok: false, erro: 'A sessão mudou desde que você abriu o painel; atualize e tente de novo.' });
+  const [, , feito, falhou] = m.linhas();
+  assert.deepEqual(feito, {
+    em: new Date(T0 + 5_000).toISOString(), id: a.id, tipo: 'mensagem', sessao: SESSAO,
+    quem: 'ab2cd3 (celular)', decisao: 'feito', motivo: null, resultado: null,
+  });
+  assert.equal(falhou.decisao, 'falhou');
+  assert.equal(falhou.id, b.id);
+  assert.equal(falhou.tipo, 'interromper');
+  assert.equal(falhou.quem, 'xy7zw8 (tablet)');
+  assert.equal(falhou.resultado, 'A sessão mudou desde que você abriu o painel; atualize e tente de novo.'.slice(0, 80));
+  // Falhou sem erro e entradas estranhas não lançam.
+  m.porteiro.concluir(a, { ok: false });
+  assert.equal(m.linhas().at(-1).decisao, 'falhou');
+  assert.doesNotThrow(() => m.porteiro.concluir(null, null));
+  assert.doesNotThrow(() => m.porteiro.concluir(undefined));
+  const ultimas = m.linhas().slice(-2);
+  assert.deepEqual(ultimas.map((l) => l.decisao), ['falhou', 'falhou']);
+  assert.ok(!fs.readFileSync(m.audArq, 'utf8').includes(MSG_SECRETA));
+});
+
+test('auditoria gira o arquivo ao passar do limite', (t) => {
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const arq = path.join(raiz, 'auditoria.jsonl');
+  const aud = new Auditoria({ arquivo: arq, agora: () => T0, maxBytes: 600 });
+  const registrar = (i) => aud.registrar({ id: `c_${String(i).padStart(16, '0')}`, tipo: 'mensagem', chave: SESSAO, quem: 'ab2cd3 (celular)', decisao: 'aceito' });
+  for (let i = 0; i < 30; i++) registrar(i);
+  const ids = (a) => fs.readFileSync(a, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).id);
+  assert.ok(fs.existsSync(`${arq}.1`));
+  assert.ok(fs.statSync(arq).size <= 600);
+  assert.ok(fs.statSync(`${arq}.1`).size <= 600);
+  assert.equal(fs.statSync(arq).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(`${arq}.1`).mode & 0o777, 0o600);
+  // O atual tem as linhas mais novas; o .1, as imediatamente anteriores; as mais velhas foram substituídas.
+  const atual = ids(arq);
+  const anterior = ids(`${arq}.1`);
+  assert.equal(atual.at(-1), 'c_0000000000000029');
+  assert.equal(Number(anterior.at(-1).slice(2)) + 1, Number(atual[0].slice(2)));
+  assert.ok(!anterior.includes('c_0000000000000000'));
+  assert.ok(!fs.existsSync(`${arq}.2`));
+});
+
+test('recusas em excesso viram uma linha de resumo', (t) => {
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  const arq = path.join(raiz, 'auditoria.jsonl');
+  let agora = T0;
+  const aud = new Auditoria({ arquivo: arq, agora: () => agora });
+  const linhas = () => fs.readFileSync(arq, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const recusar = (i) => aud.registrar({ id: `c_${i}`, tipo: 'mensagem', chave: null, quem: null, decisao: 'recusado', motivo: 'assinatura' });
+  for (let i = 0; i < 25; i++) {
+    agora = T0 + i * 1_000;
+    recusar(i);
+  }
+  // Aceitos nunca são suprimidos.
+  aud.registrar({ id: 'c_ok', tipo: 'mensagem', chave: null, quem: 'k', decisao: 'aceito' });
+  assert.equal(linhas().length, 21);
+  assert.equal(linhas().filter((l) => l.decisao === 'recusado').length, 20);
+  // Na primeira chamada do minuto seguinte sai o resumo, e depois a linha nova.
+  agora = T0 + 61_000;
+  recusar(99);
+  const fim = linhas().slice(-2);
+  assert.deepEqual(fim[0], { em: new Date(T0 + 61_000).toISOString(), decisao: 'recusado', motivo: 'suprimidas', resultado: '5 recusas' });
+  assert.equal(fim[1].id, 'c_99');
+  // O limite é por minuto e configurável.
+  const arq2 = path.join(raiz, 'outra.jsonl');
+  const aud2 = new Auditoria({ arquivo: arq2, agora: () => agora, maxRecusasPorMinuto: 2 });
+  for (let i = 0; i < 5; i++) aud2.registrar({ id: `c_${i}`, decisao: 'recusado', motivo: 'formato' });
+  agora += 60_000;
+  aud2.registrar({ id: 'c_x', decisao: 'aceito' });
+  const l2 = fs.readFileSync(arq2, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.deepEqual(l2.map((l) => l.motivo ?? null), ['formato', 'formato', 'suprimidas', null]);
+  assert.equal(l2[2].resultado, '3 recusas');
+});
+
+test('auditoria nunca lança, nem quando não consegue gravar', (t) => {
+  const avisos = t.mock.method(console, 'error', () => {});
+  const raiz = fs.mkdtempSync(path.join(os.tmpdir(), 'moises-canal-'));
+  t.after(() => fs.rmSync(raiz, { recursive: true, force: true }));
+  // O "arquivo" é uma pasta: a gravação falha.
+  const aud = new Auditoria({ arquivo: raiz, agora: () => T0 });
+  assert.doesNotThrow(() => aud.registrar({ id: 'c_1', decisao: 'aceito', quem: MSG_SECRETA }));
+  assert.doesNotThrow(() => aud.registrar(null));
+  assert.doesNotThrow(() => aud.registrar());
+  const quebrado = new Auditoria({ arquivo: path.join(raiz, 'a.jsonl'), agora: () => { throw new Error('relógio'); } });
+  assert.doesNotThrow(() => quebrado.registrar({ id: 'c_1', decisao: 'aceito' }));
+  const texto = avisos.mock.calls.map((c) => c.arguments.map(String).join(' ')).join('\n');
+  assert.ok(!texto.includes(MSG_SECRETA));
+});
+
+test('o conjunto de vistos é podado por tempo, nunca por contagem', (t) => {
+  const m = montar(t, { maxPorMinuto: 10_000 });
+  const antigos = [];
+  for (let i = 0; i < 500; i++) {
+    const c = m.comando();
+    antigos.push(c);
+    assert.equal(motivo(m.porteiro.conferir(c)), 'aceito');
+  }
+  assert.equal(Object.keys(vistosEm(m.estado)).length, 500);
+  m.relogio.agora = T0 + GUARDA_IDS_MS;
+  assert.equal(motivo(m.porteiro.conferir(m.comando())), 'aceito');
+  assert.equal(Object.keys(vistosEm(m.estado)).length, 501, 'exatamente no limite ainda fica');
+  m.relogio.agora = T0 + GUARDA_IDS_MS + 1;
+  const novo = m.comando();
+  assert.equal(motivo(m.porteiro.conferir(novo)), 'aceito');
+  const vistos = vistosEm(m.estado);
+  assert.equal(Object.keys(vistos).length, 2);
+  assert.ok(novo.id in vistos);
+  // O podado já estava expirado, então continua sem valer.
+  assert.equal(motivo(m.porteiro.conferir(antigos[0])), 'expirado');
+  // Arquivo de vistos inválido ou com entradas fora do formato não derruba o porteiro.
+  t.mock.method(console, 'error', () => {});
+  const arq = path.join(m.estado, 'comandos-vistos.json');
+  fs.writeFileSync(arq, JSON.stringify({ [novo.id]: novo.criadoEm, lixo: 'x', c_0000000000000bad: 'texto' }));
+  assert.equal(motivo(m.novoPorteiro().conferir(novo)), 'repetido');
+  fs.writeFileSync(arq, '{quebrado');
+  assert.doesNotThrow(() => m.novoPorteiro());
+});

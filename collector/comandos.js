@@ -1,0 +1,400 @@
+// Canal de comandos do painel, do lado do coletor: o Chaveiro guarda as chaves de cada aparelho
+// autorizado e o Porteiro decide se um comando é aceito. É o ponto de decisão de segurança: o
+// servidor e o Redis só transportam, e nada que venha deles é executado sem passar por aqui.
+// Contrato e ordem das conferências no PLANO ("Contrato comum" e tarefa 3); o porquê em ACHADOS
+// (S5: ordem fixa, id gravado antes de executar, poda só por tempo; S7: formato antes da
+// assinatura; S11: teto por minuto só para assinatura válida).
+import fs from 'node:fs';
+import path from 'node:path';
+import { assinaturaConfere } from './assinatura.js';
+
+export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
+export const JANELA_MS = 120_000;
+export const FOLGA_FUTURO_MS = 30_000;
+export const GUARDA_IDS_MS = 600_000;
+
+const MINUTO_MS = 60_000;
+const ARQ_VISTOS = 'comandos-vistos.json';
+const MAX_DADOS = 8_000;
+const MAX_ROTULO = 40;
+
+// Campos do comando (conferidos antes da assinatura).
+const RE_KID = /^[a-z0-9]{6}$/;
+const RE_ID = /^c_[0-9a-f]{16}$/;
+const RE_TIPO = /^[A-Za-z_]{1,20}$/; // só a forma; se é um verbo conhecido, decide a etapa `verbo`
+const RE_SESSAO = /^[a-z0-9]{1,20}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const RE_ASSINATURA = /^[A-Za-z0-9_-]{43}$/;
+// Arquivo de chaves.
+const RE_CHAVE_HEX = /^[0-9a-f]{64}$/;
+// Dados por verbo.
+const RE_PROJETO = /^[A-Za-z0-9._-]{1,60}$/; // mesma regra dos nomes de projetos.json
+const RE_CONTA = /^[a-z0-9]{1,20}$/; // mesma regra do prefixo da chave de sessão
+const RE_NOME_SESSAO = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
+const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
+const RE_HASH = /^[0-9a-f]{64}$/;
+const MODELOS = ['haiku', 'sonnet', 'opus', 'fable'];
+const ESFORCOS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const MODOS = ['manual', 'acceptEdits', 'plan'];
+const DECISOES = ['aprovar', 'negar'];
+
+const ERROS = {
+  desligado: 'Os comandos pelo painel estão desligados neste computador.',
+  sem_chave: 'Nenhum aparelho está autorizado neste computador.',
+  sem_credencial: 'Comando sem assinatura.',
+  formato: 'Comando em formato inválido.',
+  verbo: 'Tipo de comando desconhecido.',
+  aparelho: 'Este aparelho não está autorizado neste computador.',
+  assinatura: 'A assinatura do comando não confere com o código deste aparelho.',
+  expirado: 'O comando demorou mais de 2 minutos para chegar e não foi executado.',
+  relogio: 'O relógio do aparelho está adiantado; acerte a hora e tente de novo.',
+  repetido: 'Este comando já tinha sido recebido.',
+  ritmo: 'Comandos demais em pouco tempo; espere um minuto e tente de novo.',
+  interno: 'Erro interno do coletor; o comando não foi executado.',
+};
+
+const objetoSimples = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const desligado = () => process.env.MOISES_COMANDOS === '0';
+
+// ---------- Chaveiro ----------
+
+// Arquivo JSON { "<kid>": { "rotulo", "chave": "<64 hex>", "criadaEm" } }, com permissão 600.
+// É relido quando muda (inode, tamanho, mtime, ctime ou modo): revogar um aparelho vale sem reiniciar.
+export class Chaveiro {
+  constructor({ arquivo }) {
+    this.arquivo = arquivo;
+    this.marca = undefined;
+    this.chaves = new Map();
+  }
+
+  obter(kid) {
+    if (typeof kid !== 'string') return null;
+    this.#recarregar();
+    const e = this.chaves.get(kid);
+    return e ? { chave: Buffer.from(e.chave), rotulo: e.rotulo } : null;
+  }
+
+  aparelhos() {
+    this.#recarregar();
+    return [...this.chaves].map(([kid, e]) => ({ kid, rotulo: e.rotulo }));
+  }
+
+  #recarregar() {
+    let st;
+    try {
+      st = fs.statSync(this.arquivo, { bigint: true });
+    } catch {
+      this.marca = null;
+      this.chaves = new Map();
+      return;
+    }
+    if (marcaDe(st) === this.marca) return;
+    let fd = null;
+    try {
+      fd = fs.openSync(this.arquivo, 'r');
+      // A marca e a permissão vêm do mesmo arquivo aberto que vai ser lido.
+      const aberto = fs.fstatSync(fd, { bigint: true });
+      this.marca = marcaDe(aberto);
+      this.chaves = new Map();
+      if (!aberto.isFile()) return aviso('não é um arquivo comum');
+      if ((Number(aberto.mode) & 0o077) !== 0) return aviso('tem permissão mais aberta que 600');
+      let json;
+      try {
+        json = JSON.parse(fs.readFileSync(fd, 'utf8'));
+      } catch {
+        // A mensagem do JSON.parse cita trechos do arquivo: nunca vai para o log.
+        return aviso('não é um JSON válido');
+      }
+      if (!objetoSimples(json)) return aviso('não é um objeto JSON');
+      for (const [kid, e] of Object.entries(json)) {
+        if (!RE_KID.test(kid) || !objetoSimples(e) || typeof e.chave !== 'string' || !RE_CHAVE_HEX.test(e.chave)) continue;
+        const rotulo = typeof e.rotulo === 'string' ? Array.from(e.rotulo).slice(0, MAX_ROTULO).join('') : '';
+        this.chaves.set(kid, { chave: Buffer.from(e.chave, 'hex'), rotulo });
+      }
+    } catch (err) {
+      this.marca = null;
+      this.chaves = new Map();
+      console.error(`chaveiro: não foi possível ler o arquivo de chaves de comandos (${err?.code || 'erro'}).`);
+    } finally {
+      if (fd !== null) fs.closeSync(fd);
+    }
+  }
+}
+
+const marcaDe = (st) => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.mode}`;
+
+function aviso(problema) {
+  console.error(`chaveiro: o arquivo de chaves de comandos ${problema}; nenhuma chave foi carregada.`);
+}
+
+// ---------- Dados por verbo ----------
+
+const texto = (min, max) => (v) => typeof v === 'string' && v.length >= min && v.length <= max;
+const casa = (re) => (v) => typeof v === 'string' && re.test(v);
+const umDe = (lista) => (v) => typeof v === 'string' && lista.includes(v);
+const booleano = (v) => typeof v === 'boolean';
+const obrigatorio = (confere) => ({ obrigatorio: true, confere });
+const opcional = (confere) => ({ obrigatorio: false, confere });
+
+// `visto` = { projeto: string até 200, nome: string até 200 | null }, exatamente esses dois campos.
+function copiarVisto(v) {
+  if (!objetoSimples(v)) return null;
+  const chaves = Object.keys(v);
+  if (chaves.length !== 2 || !Object.hasOwn(v, 'projeto') || !Object.hasOwn(v, 'nome')) return null;
+  if (!texto(0, 200)(v.projeto)) return null;
+  if (v.nome !== null && !texto(0, 200)(v.nome)) return null;
+  const copia = Object.create(null);
+  copia.projeto = v.projeto;
+  copia.nome = v.nome;
+  return copia;
+}
+const VISTO = { obrigatorio: true, copiar: copiarVisto };
+
+const DADOS = new Map([
+  ['abrir', new Map([
+    ['projeto', obrigatorio(casa(RE_PROJETO))],
+    ['pedido', obrigatorio(texto(1, 6_000))],
+    ['conta', opcional(casa(RE_CONTA))],
+    ['modelo', opcional(umDe(MODELOS))],
+    ['esforco', opcional(umDe(ESFORCOS))],
+    ['modoPermissao', opcional(umDe(MODOS))],
+    ['worktree', opcional(booleano)],
+    ['nome', opcional(casa(RE_NOME_SESSAO))],
+  ])],
+  ['mensagem', new Map([
+    ['texto', obrigatorio(texto(1, 6_000))],
+    ['visto', VISTO],
+  ])],
+  ['permissao', new Map([
+    ['pedido', obrigatorio(casa(RE_PEDIDO))],
+    ['decisao', obrigatorio(umDe(DECISOES))],
+    ['vistoHash', opcional(casa(RE_HASH))],
+    ['visto', VISTO],
+  ])],
+  ['interromper', new Map([['visto', VISTO]])],
+  ['encerrar', new Map([
+    ['nome', opcional(texto(0, 140))],
+    ['visto', VISTO],
+  ])],
+  ['retomar', new Map([
+    ['modoPermissao', opcional(umDe(MODOS))],
+    ['modelo', opcional(umDe(MODELOS))],
+    ['esforco', opcional(umDe(ESFORCOS))],
+    ['visto', VISTO],
+  ])],
+]);
+
+// Faz o JSON.parse da mesma string cuja assinatura conferiu e devolve um objeto novo, sem protótipo,
+// só com os campos da tabela do verbo; null se faltar campo obrigatório, sobrar campo (inclusive
+// `__proto__`) ou algum valor fugir da regra. Campo opcional com null conta como ausente.
+function dadosDoVerbo(tipo, bruto) {
+  let d;
+  try {
+    d = JSON.parse(bruto);
+  } catch {
+    return null;
+  }
+  const regras = DADOS.get(tipo);
+  if (!regras || !objetoSimples(d)) return null;
+  for (const k of Object.keys(d)) if (!regras.has(k)) return null;
+  const saida = Object.create(null);
+  for (const [k, regra] of regras) {
+    const v = Object.hasOwn(d, k) ? d[k] : undefined;
+    if (v === undefined || (v === null && !regra.obrigatorio)) {
+      if (regra.obrigatorio) return null;
+      continue;
+    }
+    if (regra.copiar) {
+      const copia = regra.copiar(v);
+      if (copia === null) return null;
+      saida[k] = copia;
+    } else {
+      if (!regra.confere(v)) return null;
+      saida[k] = v;
+    }
+  }
+  if (tipo === 'permissao' && saida.decisao === 'aprovar' && saida.vistoHash === undefined) return null;
+  return saida;
+}
+
+// ---------- Formato do comando ----------
+
+// Cada campo é lido uma única vez, para um getter não trocar o valor entre a conferência e o uso.
+function copiarComando(cmd) {
+  if (cmd === null || typeof cmd !== 'object') return null;
+  const { v, kid, id, tipo, chave, criadoEm, dados, assinatura } = cmd;
+  return { v, kid, id, tipo, chave, criadoEm, dados, assinatura };
+}
+
+// Tabela do "Contrato comum". A chave de sessão é conferida aqui, por verbo, porque null e ''
+// assinam igual: nula em `abrir`, UUID com conta nos demais.
+function formatoConfere(c) {
+  if (c.v !== 1) return false;
+  if (typeof c.kid !== 'string' || !RE_KID.test(c.kid)) return false;
+  if (typeof c.id !== 'string' || !RE_ID.test(c.id)) return false;
+  if (typeof c.tipo !== 'string' || !RE_TIPO.test(c.tipo)) return false;
+  const chaveOk = typeof c.chave === 'string' && RE_SESSAO.test(c.chave);
+  if (c.tipo === 'abrir') {
+    if (c.chave !== null) return false;
+  } else if (TIPOS.includes(c.tipo)) {
+    if (!chaveOk) return false;
+  } else if (c.chave !== null && !chaveOk) {
+    return false;
+  }
+  if (!Number.isSafeInteger(c.criadoEm)) return false;
+  if (typeof c.dados !== 'string' || c.dados.length > MAX_DADOS) return false;
+  if (typeof c.assinatura !== 'string' || !RE_ASSINATURA.test(c.assinatura)) return false;
+  return true;
+}
+
+// ---------- Porteiro ----------
+
+export class Porteiro {
+  constructor({ chaveiro, pastaEstado, auditoria, agora = () => Date.now(), maxPorMinuto = 30 }) {
+    this.chaveiro = chaveiro;
+    this.pastaEstado = pastaEstado;
+    this.auditoria = auditoria;
+    this.agora = agora;
+    this.maxPorMinuto = maxPorMinuto;
+    this.arqVistos = path.join(pastaEstado, ARQ_VISTOS);
+    this.vistos = new Map(); // id → criadoEm
+    this.recentes = []; // instantes dos comandos válidos que entraram no teto por minuto
+    this.#lerVistos();
+  }
+
+  ativo() {
+    if (desligado()) return { ativa: false, motivo: 'desligado' };
+    if (this.chaveiro.aparelhos().length === 0) return { ativa: false, motivo: 'sem_chave' };
+    return { ativa: true, motivo: null };
+  }
+
+  // Decide se o comando é aceito, nesta ordem (PLANO, tarefa 3). Cada decisão vira uma linha na
+  // auditoria. Nunca lança: qualquer erro inesperado é recusa com motivo `interno`.
+  conferir(cmd) {
+    let c = null;
+    let quem = null;
+    const recusa = (motivo) => this.#recusar(c, quem, motivo);
+    try {
+      c = copiarComando(cmd);
+      quem = c && typeof c.kid === 'string' ? c.kid : null; // ainda não confirmado pela assinatura
+      if (desligado()) return recusa('desligado');
+      if (this.chaveiro.aparelhos().length === 0) return recusa('sem_chave');
+      if (!c || c.assinatura === undefined || c.assinatura === null || c.assinatura === '') return recusa('sem_credencial');
+      if (!formatoConfere(c)) return recusa('formato');
+      if (!TIPOS.includes(c.tipo)) return recusa('verbo');
+      const ap = this.chaveiro.obter(c.kid);
+      if (!ap) return recusa('aparelho');
+      if (!assinaturaConfere(ap.chave, c)) return recusa('assinatura');
+      quem = `${c.kid} (${ap.rotulo})`;
+
+      const agora = this.agora();
+      if (agora - c.criadoEm >= JANELA_MS) return recusa('expirado');
+      if (c.criadoEm - agora > FOLGA_FUTURO_MS) {
+        // Guardado como visto: quem copiou o comando não pode reenviá-lo quando ele couber na folga.
+        this.vistos.set(c.id, c.criadoEm);
+        this.#gravarVistos(agora);
+        return recusa('relogio');
+      }
+      if (this.vistos.has(c.id)) return recusa('repetido');
+      // A partir daqui o id está queimado, seja qual for a decisão.
+      this.vistos.set(c.id, c.criadoEm);
+      if (!this.#cabeNoRitmo(agora)) {
+        this.#gravarVistos(agora);
+        return recusa('ritmo');
+      }
+      const dados = dadosDoVerbo(c.tipo, c.dados);
+      if (!dados) {
+        this.#gravarVistos(agora);
+        return recusa('formato');
+      }
+      // Falha fechada: sem o id em disco, um reinício permitiria executar de novo.
+      if (!this.#gravarVistos(agora)) return recusa('interno');
+      this.#auditar(c, quem, 'aceito');
+      return { ok: true, dados, quem };
+    } catch (err) {
+      console.error(`porteiro: erro inesperado ao conferir um comando (${err?.code || err?.name || 'erro'}).`);
+      return recusa('interno');
+    }
+  }
+
+  // Registra o resultado da execução de um comando aceito. Nunca lança.
+  concluir(cmd, fim) {
+    try {
+      const c = copiarComando(cmd) ?? {};
+      const kid = typeof c.kid === 'string' ? c.kid : null;
+      const ap = kid ? this.chaveiro.obter(kid) : null;
+      const ok = fim?.ok === true;
+      const erro = !ok && typeof fim?.erro === 'string' && fim.erro ? fim.erro : null;
+      this.#auditar(c, ap ? `${kid} (${ap.rotulo})` : kid, ok ? 'feito' : 'falhou', null, erro);
+    } catch (err) {
+      console.error(`porteiro: não foi possível registrar a conclusão de um comando (${err?.code || err?.name || 'erro'}).`);
+    }
+  }
+
+  #recusar(c, quem, motivo) {
+    this.#auditar(c, quem, 'recusado', motivo);
+    return { ok: false, motivo, erro: ERROS[motivo] };
+  }
+
+  #auditar(c, quem, decisao, motivo = null, resultado = null) {
+    this.auditoria?.registrar({ id: c?.id, tipo: c?.tipo, chave: c?.chave, quem, decisao, motivo, resultado });
+  }
+
+  // Teto por minuto, contando só comandos com assinatura válida, dentro da validade e inéditos.
+  #cabeNoRitmo(agora) {
+    this.recentes = this.recentes.filter((t) => agora - t < MINUTO_MS);
+    if (this.recentes.length >= this.maxPorMinuto) return false;
+    this.recentes.push(agora);
+    return true;
+  }
+
+  #lerVistos() {
+    let bruto;
+    try {
+      bruto = fs.readFileSync(this.arqVistos, 'utf8');
+    } catch (err) {
+      if (err?.code !== 'ENOENT') console.error(`porteiro: não foi possível ler os comandos vistos (${err?.code || 'erro'}).`);
+      return;
+    }
+    let json;
+    try {
+      json = JSON.parse(bruto);
+    } catch {
+      json = null;
+    }
+    if (!objetoSimples(json)) {
+      console.error('porteiro: o arquivo de comandos vistos é inválido; começando vazio.');
+      return;
+    }
+    for (const [id, criadoEm] of Object.entries(json)) {
+      if (RE_ID.test(id) && Number.isSafeInteger(criadoEm)) this.vistos.set(id, criadoEm);
+    }
+  }
+
+  // Poda por tempo (nunca por contagem: um id só sai quando já estaria expirado) e grava por
+  // arquivo temporário e rename. Devolve false se não conseguiu gravar.
+  #gravarVistos(agora) {
+    for (const [id, criadoEm] of this.vistos) if (agora - criadoEm > GUARDA_IDS_MS) this.vistos.delete(id);
+    const tmp = `${this.arqVistos}.${process.pid}.tmp`;
+    let fd = null;
+    try {
+      fs.mkdirSync(this.pastaEstado, { recursive: true, mode: 0o700 });
+      fd = fs.openSync(tmp, 'w', 0o600);
+      fs.fchmodSync(fd, 0o600);
+      fs.writeSync(fd, JSON.stringify(Object.fromEntries(this.vistos)));
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      fs.renameSync(tmp, this.arqVistos);
+      return true;
+    } catch (err) {
+      console.error(`porteiro: não foi possível gravar os comandos vistos (${err?.code || 'erro'}).`);
+      if (fd !== null) fs.closeSync(fd);
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        /* nada a limpar */
+      }
+      return false;
+    }
+  }
+}
