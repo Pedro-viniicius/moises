@@ -50,3 +50,27 @@ Revisores: `seguranca` (S14 a S26), modelagem adversarial da revisão diferencia
 | Q1 | Média (qa) | Relógio do celular atrasado era recusado como "demorou mais de 2 minutos", sem mandar acertar a hora. | Corrigir: o coletor distingue relógio atrasado pela idade informada pelo servidor (só para escolher a mensagem; a decisão continua sendo recusar). |
 | Q2 | Baixa (qa) | A pasta de estado do coletor nascia 775 (o módulo de ideias a criava sem modo). Coincide com o endurecimento sugerido pela auditoria de padrões inseguros. | Corrigir: pastas 700 e arquivos 600 em todos os módulos do coletor. |
 | — | Informativa (qa) | Pedidos legítimos com nome de arquivo de 40+ caracteres sem barra, número de 10 dígitos ou `TOKEN_FILE=` saem mascarados e só podem ser negados pelo celular. | Registrado: falha para o lado seguro; aprove esses no computador. |
+
+## Rodada 2: conferência das correções e pontas afiadas
+
+Revisores: `seguranca` (CORRIGIR ANTES DO RELEASE, sem crítica nem alta), `revisor` (APROVADO COM RESSALVAS), `qa` (APROVADO COM RESSALVAS; 142 de 163 mutantes mortos, os sobreviventes equivalentes ou de baixa relevância), `designer` (APROVADO) e `/sharp-edges:sharp-edges` sobre a API de comandos e a configuração do coletor (SE-…). Todos os achados "Corrigir" da rodada 1 foram conferidos como corrigidos, com teste que falha sem a correção.
+
+| ID | Gravidade | Achado | Decisão |
+|---|---|---|---|
+| S27 (= SE-M6) | Média | A conferência do painel publicado (S15) cobria 5 arquivos fixos: `login.html`, `login.js` e o caminho `/` ficavam de fora, e a chave do aparelho pode ser usada por qualquer script da mesma origem. | Corrigir: conferir todos os arquivos de `public/` e `/`; `worker-src 'none'` na CSP. |
+| S28 (= SE-M1) | Média | `MOISES_COMANDOS=0 # comentário`, `export …` ou `desligado` no `coletor.env` deixavam tudo ligado em silêncio. | Corrigir: valor aparado, comentário cortado, valores reconhecidos, valor estranho desliga com aviso, qualquer fonte que desliga vale. |
+| SE-M2 | Média | `MOISES_FERRAMENTAS` aceitava qualquer nome (Task, WebFetch…), e o `init` confiava na lista configurada. | Corrigir: a variável só reduz a lista padrão. |
+| SE-M3 | Média | `--pedidos` imprimia a impressão digital que `--autorizar` pede; copiar do terminal pula a conferência. | Corrigir: `--pedidos` não mostra a impressão; ela é digitada a partir do aparelho; aviso de rótulo repetido. |
+| SE-M4 | Média | O script e o coletor resolviam o arquivo de chaves por variáveis diferentes: revogar podia mexer no arquivo errado. | Corrigir: mesma regra de caminhos; o script imprime o caminho usado. |
+| SE-M5 | Média | "Sensível" e as regras `deny` são lista textual com caminhos fixos; uma sessão de outro projeto podia editar o coletor ou o systemd do usuário com aprovação pelo celular. | Corrigir: caminhos protegidos reais (raiz do coletor, configuração, estado, `~/.config/systemd/user`) negados às ferramentas de arquivo e sensíveis no Bash; mais padrões de ofuscação marcam sensível. Continua heurística, não fronteira (README). |
+| A1-resto | Média (dentro do S15) | Com a Vercel tomada, a página pode pedir um novo pareamento com a chave do invasor e mostrar a impressão dele. | Corrigir em parte: `--autorizar` recusa enquanto a última conferência do painel divergir. O resto fica no S15. |
+| R9 | Média (lead) | O ingest grava o objeto inteiro do comando: dois ingests sobrepostos (envio que estourou o tempo e foi reenviado) podem voltar `feito` para `recebido`. Hipótese mais provável para a falha de 1 em 12 do e2e (não provada: o registro daquela execução não tinha horários). Mesmo defeito de raiz do S20. | Corrigir: resultado de cada etapa gravado uma vez (`HSETNX`) em hashes próprios; o estado só avança. Fecha também o S20. |
+| SE-M7 | Baixa a média | Número inválido num teto (`0,50`) voltava ao padrão, mais frouxo. | Corrigir: vírgula decimal aceita; teto inválido vale o limite mais restritivo. |
+| SE-B1, SE-B2, SE-B3, SE-B4 | Baixa | Construtores sem validação; contador diário corrompido zerava; chaveiro não amarra `kid` à chave; `argsExtra` podia sobrescrever flags fixas. | Corrigir. |
+| SE-B5 | Baixa | `MOISES_CONFERIR_PAINEL=0` não aparece no celular. | Em aberto (baixa): aparece no log de início. |
+| SE-I1 | Informativa | O `init` não confere `plugins`, `skills` e `agents`. | Em aberto: `--restricted` e `--disable-slash-commands` conferidos nos spikes B7 e B8; reconferir a cada atualização do Claude Code (o e2e roda depois de atualizar). |
+| R7 / Q3 | Sugestão / baixa | Teste procurava processo por marcador fixo na máquina toda. | Corrigir. |
+| R8 | Sugestão | Comentário do teto por minuto prometia limitar o arquivo de vistos. | Corrigir. |
+| Q4 | Baixa | Testes deixavam pastas em `/tmp`. | Corrigir. |
+| D8 | Sugestão | O motivo de "Comandos desligados" fica no fim do cartão. | Em aberto (sugestão; segue a decisão D1). |
+| S15-resto, S16-resto | Média | Vercel tomada ainda pode servir conteúdo diferente ao coletor e ao celular; texto das sessões comandadas sem cifra. | Levados ao dono como risco (relatório final). |
