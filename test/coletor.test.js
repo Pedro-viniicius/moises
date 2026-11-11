@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { custo } from '../collector/precos.js';
 import { novoEstado, lerNovidades, somar, diaLocal } from '../collector/transcript.js';
 import { Coletor, statusDe, estadoDe, inicioDoProcesso, fatorOficial } from '../collector/sessoes.js';
-import { redigir, redigirBloco } from '../collector/redigir.js';
+import { redigir, redigirBloco, escondeConteudo } from '../collector/redigir.js';
 import { executarEncerrar, reiniciarLimites, nomePadrao, ehClaude, logDeEncerramento } from '../collector/encerrar.js';
 import { urlAceita } from '../collector/index.js';
 import { recomendar, lerResposta, Ideias } from '../collector/ideias.js';
@@ -673,6 +673,30 @@ test('redigirBloco escapa espaço não separável, U+2028, U+061C, seletor de va
   assert.equal(redigirBloco(c(0xe0041)).texto, '\\u{E0041}');
   // o espaço comum, \n e \t ficam; letras acentuadas e emoji comum também
   assert.deepEqual(redigirBloco('a b\n\tç ✓'), { texto: 'a b\n\tç ✓', alterado: false });
+});
+
+test('escondeConteudo marca mais de 30 linhas, três quebras seguidas, 16 espaços em fila e espaço no fim de linha', () => {
+  const linhas = (n) => Array.from({ length: n }, (_, i) => `linha ${i}`).join('\n');
+  const escondem = [
+    linhas(31),
+    'a\n\n\nb',
+    'a\n \n\t\nb',
+    'a\n\n\n\n\nb',
+    `a${' '.repeat(16)}b`,
+    `a${'\t'.repeat(16)}b`,
+    `a${' \t'.repeat(8)}b`,
+    'a \nb',
+    'a\t\nb',
+    'a ',
+    'a\nb\t',
+    `${linhas(3)}\n\n\n`,
+    'a\n \nb', // linha só com espaço: espaço no fim de linha
+  ];
+  for (const s of escondem) assert.equal(escondeConteudo(s), true, JSON.stringify(s).slice(0, 80));
+  const inteiros = ['', 'ls -la', linhas(30), 'a\n\nb',`a${' '.repeat(15)}b`, 'a\n\tb', '  indentado\n    mais', 'echo "a  b"', 'ação ✓'];
+  for (const s of inteiros) assert.equal(escondeConteudo(s), false, JSON.stringify(s).slice(0, 80));
+  // Só texto: o que não for string não passa por inteiro.
+  for (const x of [null, undefined, 42]) assert.equal(escondeConteudo(x), true, String(x));
 });
 
 test('redigir mascara cartão válido e CEP e não mascara número que falha no Luhn', () => {

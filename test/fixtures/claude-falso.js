@@ -17,11 +17,15 @@
 //   teimoso                passa a ignorar o fim do stdin e o SIGTERM
 //   init-ruim              init com permissionMode "bypassPermissions"
 //   init-mcp, init-ferramenta   init com um servidor MCP, ou com uma ferramenta fora da lista
+//   sem-init               sem init: pede permissão para Bash e, com a resposta, emite o result
+//   neto                   dispara `sleep 300` em segundo plano (no mesmo grupo de processos), grava o pid
+//                          dele em <caminho>.neto e responde
 //   qualquer outro texto   init coerente com os argumentos e result com o próprio texto
 //
 // Com --system-prompt=registro:<caminho>, grava em <caminho> o argv, os nomes das variáveis de ambiente,
 // o valor de CLAUDE_CONFIG_DIR e a pasta de trabalho; cada linha recebida no stdin vai para <caminho>.entrada.
 // Com --system-prompt=registro:<caminho>:sai, sai com código 2 antes de ler.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import readline from 'node:readline';
 
@@ -88,7 +92,7 @@ function iniciar(texto) {
   if (texto === 'init-ruim') init({ permissionMode: 'bypassPermissions' });
   else if (texto === 'init-mcp') init({ mcp_servers: [{ name: 'externo', status: 'connected' }] });
   else if (texto === 'init-ferramenta') init({ tools: [...tools, 'WebFetch'] });
-  else init();
+  else if (texto !== 'sem-init') init();
 
   const comeca = (prefixo) => texto.startsWith(prefixo) && texto.slice(prefixo.length);
   const novoTurno = () => (turno = { ordem: [], pendentes: new Map(), decisoes: [] });
@@ -107,6 +111,15 @@ function iniciar(texto) {
   } else if (texto === 'ferramenta-ruim') {
     novoTurno();
     pedir('Bash\nRead', { command: 'ls' });
+  } else if (texto === 'sem-init') {
+    novoTurno();
+    pedir('Bash', { command: 'echo sem init' });
+  } else if (texto === 'neto') {
+    // Sem `detached`: o neto fica no grupo de processos deste falso, como um comando do Bash em segundo plano.
+    const neto = spawn('sleep', ['300'], { stdio: 'ignore' });
+    neto.unref();
+    if (registro) fs.writeFileSync(`${registro}.neto`, String(neto.pid));
+    resultado('neto');
   } else if (texto === 'demora') {
     turno = { demora: true };
   } else if (texto === 'lixo') {

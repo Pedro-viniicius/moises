@@ -270,7 +270,7 @@ test('abrir recusa projeto fora da lista, conta desconhecida, o que passa do tet
   assert.equal((await ctx.orq.executar(cmd('encerrar', a), { visto: vistoDe(ctx, a) })).ok, true);
   const c = await abrir(ctx); // terceira do dia
   assert.equal((await ctx.orq.executar(cmd('encerrar', c), { visto: vistoDe(ctx, c) })).ok, true);
-  assert.match((await tentar({})).erro, /Limite de 3 sessões abertas pelo painel hoje/);
+  assert.equal((await tentar({})).erro, 'Limite de 3 aberturas e retomadas pelo painel hoje atingido.');
   const contagem = JSON.parse(fs.readFileSync(path.join(ctx.pastaEstado, 'abrir.json'), 'utf8'));
   assert.deepEqual(contagem, { dia: diaLocal(Date.now()), n: 3 });
   assert.equal(fs.statSync(path.join(ctx.pastaEstado, 'abrir.json')).mode & 0o777, 0o600);
@@ -503,6 +503,203 @@ test('pedido sem resposta é negado ao expirar', async (t) => {
   await ate(() => respostas(ctx2).length === 1, 'negativa chegar ao filho');
   await espera(100);
   assert.deepEqual(respostas(ctx2).map((l) => l.response.response), [{ behavior: 'deny', message: 'Sem resposta do painel a tempo.' }]);
+});
+
+// ---------------------------------------------------------------- rodada de correção 1 (tarefa 11)
+
+const ERRO_INCOMPLETO = 'Este pedido não coube inteiro no painel; só é possível negar.';
+const ERRO_SENSIVEL = 'Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue.';
+
+// Manda um pedido de Bash, espera aparecer e devolve o pedido publicado (ainda pendente).
+async function pedirBash(ctx, chave, comando) {
+  await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'turno anterior terminar');
+  await mensagem(ctx, chave, `permissao:${comando}`);
+  const [p] = await pedidoPendente(ctx, chave);
+  return p;
+}
+
+test('S14: pedido com conteúdo escondido sai incompleto e aprovar é recusado', async (t) => {
+  const ctx = preparar(t);
+  const chave = await abrir(ctx);
+  const linhas = (n) => Array.from({ length: n }, (_, i) => `echo linha ${i}`).join('\n');
+  const escondidos = {
+    'mais de 30 linhas': linhas(31),
+    'três quebras seguidas': 'echo a\n\n\nrm -rf build',
+    'três quebras com espaço e tabulação entre elas': 'echo a\n \n\t\nrm -rf build',
+    '16 espaços seguidos': `echo a${' '.repeat(16)}; rm -rf build`,
+    '16 espaços e tabulações seguidos': `echo a${' \t'.repeat(8)}; rm -rf build`,
+    'espaço no fim de uma linha': 'echo a \nrm -rf build',
+    'tabulação no fim do comando': 'echo a\t',
+  };
+  for (const [caso, comando] of Object.entries(escondidos)) {
+    const p = await pedirBash(ctx, chave, comando);
+    assert.equal(p.entrada, comando, caso);
+    assert.equal(p.completo, false, caso);
+    assert.equal(p.sensivel, false, caso);
+    assert.equal((await responder(ctx, chave, p, 'aprovar')).erro, ERRO_INCOMPLETO, caso);
+    assert.equal(ctx.publicada(chave).permissoes.length, 1, `${caso}: recusar a aprovação não consome o pedido`);
+    assert.equal((await responder(ctx, chave, p, 'negar')).ok, true, caso);
+  }
+  assert.ok(respostas(ctx).every((l) => l.response.response.behavior === 'deny'), 'nada escondido foi aprovado');
+
+  // Logo abaixo dos limites, o pedido continua inteiro e aprovável.
+  for (const comando of [linhas(30), 'echo a\n\necho b', `echo a${' '.repeat(15)}b`, 'echo a\n\techo b']) {
+    const p = await pedirBash(ctx, chave, comando);
+    assert.equal(p.completo, true, JSON.stringify(comando));
+    assert.equal((await responder(ctx, chave, p, 'aprovar')).ok, true, JSON.stringify(comando));
+  }
+});
+
+test('S26: comando de Bash com caractere fora de ASCII imprimível é sensível', async (t) => {
+  const ctx = preparar(t);
+  const chave = await abrir(ctx);
+  const c = (cp) => String.fromCodePoint(cp);
+  for (const comando of ['echo ação', `curl https://ex${c(0x430)}mple.com`, `echo a${c(0x202e)}b`, `echo a${c(0xa0)}b`]) {
+    const p = await pedirBash(ctx, chave, comando);
+    assert.equal(p.sensivel, true, JSON.stringify(comando));
+    await responder(ctx, chave, p, 'negar');
+  }
+  const ascii = await pedirBash(ctx, chave, 'ls -la\techo ~/fim');
+  assert.equal(ascii.sensivel, false, 'tabulação e ASCII imprimível não marcam');
+  await responder(ctx, chave, ascii, 'negar');
+
+  // Só o comando do Bash: outra ferramenta com acento no caminho não vira sensível por isso.
+  await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'turno anterior terminar');
+  await mensagem(ctx, chave, 'editar:/tmp/relatório.txt');
+  const [edit] = await pedidoPendente(ctx, chave);
+  assert.equal(edit.ferramenta, 'Edit');
+  assert.equal(edit.sensivel, false);
+});
+
+test('pedido sensível não pode ser aprovado pelo painel; negar continua valendo', async (t) => {
+  const ctx = preparar(t);
+  const chave = await abrir(ctx);
+  for (const comando of ['cat ~/.ssh/id_ed25519', 'echo ação']) {
+    const p = await pedirBash(ctx, chave, comando);
+    assert.equal(p.sensivel, true, comando);
+    assert.equal(p.completo, true, comando);
+    const r = await responder(ctx, chave, p, 'aprovar');
+    assert.equal(r.erro, ERRO_SENSIVEL, comando);
+    assert.equal(ctx.publicada(chave).permissoes.length, 1, `${comando}: o pedido continua pendente`);
+    assert.equal((await responder(ctx, chave, p, 'negar')).ok, true, comando);
+  }
+  await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'turno terminar');
+  assert.deepEqual(
+    respostas(ctx).map((l) => l.response.response),
+    [1, 2].map(() => ({ behavior: 'deny', message: 'Negado pelo painel.' })),
+  );
+});
+
+// Vivo e não zumbi (o neto órfão é recolhido pelo init, mas pode passar um instante como zumbi).
+const vivoDeVerdade = (pid) => {
+  try {
+    return fs.readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] !== 'Z';
+  } catch {
+    return false;
+  }
+};
+
+test('S18: encerrar mata também os processos netos da sessão', async (t) => {
+  const ctx = preparar(t);
+  const netos = [];
+  t.after(() => {
+    for (const pid of netos) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* já morreu */
+      }
+    }
+  });
+  const abrirComNeto = async () => {
+    const chave = await abrir(ctx);
+    fs.rmSync(`${ctx.registro}.neto`, { force: true });
+    await mensagem(ctx, chave, 'neto');
+    const pid = Number(await ate(() => fs.existsSync(`${ctx.registro}.neto`) && fs.readFileSync(`${ctx.registro}.neto`, 'utf8'), 'neto nascer'));
+    netos.push(pid);
+    await ate(() => ctx.publicada(chave).estado === 'esperando_mensagem', 'responder depois do neto');
+    assert.equal(vivoDeVerdade(pid), true, 'o neto está vivo antes de encerrar');
+    return { chave, pid };
+  };
+
+  // Encerrar pelo painel: o filho sai pelo fim do stdin, e o neto vai junto.
+  const a = await abrirComNeto();
+  const r = await ctx.orq.executar(cmd('encerrar', a.chave), { visto: vistoDe(ctx, a.chave) });
+  assert.equal(r.ok, true, r.erro);
+  await ate(() => !vivoDeVerdade(a.pid), 'neto morrer com o encerrar');
+
+  // Fechar o coletor também leva os netos.
+  const b = await abrirComNeto();
+  await ctx.orq.fechar();
+  await ate(() => !vivoDeVerdade(b.pid), 'neto morrer com o fechar');
+});
+
+test('S19: pedido de permissão antes de um init conferido é negado e não é publicado; result sem init encerra a sessão', async (t) => {
+  const ctx = preparar(t);
+  const r = await ctx.orq.executar(cmd('abrir'), { projeto: 'projeto-a', pedido: 'sem-init' });
+  // A abertura vale no primeiro evento (o pedido, negado na hora); depois, o result sem init encerra a sessão.
+  assert.equal(r.ok, true, r.erro);
+  const chave = r.chaveNova;
+  assert.deepEqual(ctx.publicada(chave).permissoes, [], 'o pedido sem init não é publicado');
+  await ate(() => ctx.publicada(chave)?.erro === ERRO_INIT, 'sessão sem init encerrar com o erro do init');
+  await ate(() => ctx.orq.abertas() === 0, 'filho morrer');
+  assert.deepEqual(respostas(ctx).map((l) => l.response), [{ subtype: 'success', request_id: 'req_1', response: { behavior: 'deny', message: 'Sessão sem configuração conferida.' } }]);
+  assert.equal(ctx.publicada(chave).estado, 'encerrada');
+});
+
+test('S23: abrir e retomar recusam a pasta que contém o próprio coletor', async (t) => {
+  const erro = 'Esta pasta contém o próprio Moisés; abra-a só pelo terminal.';
+  // Padrão: a raiz do repositório onde o coletor roda, e qualquer pasta acima dela.
+  const raizRepo = fileURLToPath(new URL('..', import.meta.url));
+  const ctx = preparar(t);
+  ctx.listaProjetos.moises = raizRepo;
+  ctx.listaProjetos.acima = path.dirname(path.resolve(raizRepo));
+  for (const projeto of ['moises', 'acima']) {
+    assert.equal((await ctx.orq.executar(cmd('abrir'), { projeto, pedido: 'oi' })).erro, erro, projeto);
+  }
+  assert.equal(ctx.orq.abertas(), 0);
+  assert.ok(!fs.existsSync(ctx.registro), 'nada recusado pode iniciar processo');
+  assert.equal(fs.existsSync(path.join(ctx.pastaEstado, 'abrir.json')), false, 'recusa não conta no teto diário');
+
+  // Com o coletor dentro do projeto-a (por um atalho, para valer o caminho real).
+  const pastaColetor = path.join(ctx.proj, 'ferramentas', 'moises');
+  fs.mkdirSync(pastaColetor, { recursive: true });
+  const atalho = path.join(ctx.raiz, 'atalho-coletor');
+  fs.symlinkSync(pastaColetor, atalho);
+  const orq = ctx.criar({ pastaColetor: atalho });
+  t.after(() => orq.fechar());
+  assert.equal((await orq.executar(cmd('abrir'), { projeto: 'projeto-a', pedido: 'oi' })).erro, erro);
+  const vizinho = await orq.executar(cmd('abrir'), { projeto: 'projeto-b', pedido: 'oi' });
+  assert.equal(vizinho.ok, true, vizinho.erro);
+
+  // Retomar: a pasta da sessão é o projeto-a (contém o coletor) ou a própria pasta do coletor.
+  const naRaiz = `principal:${sessaoNoColetor(ctx, ctx.principal, { cwd: ctx.proj })}`;
+  ctx.listaProjetos.coletor = pastaColetor;
+  const naPastaDoColetor = `principal:${sessaoNoColetor(ctx, ctx.principal, { cwd: pastaColetor })}`;
+  for (const chave of [naRaiz, naPastaDoColetor]) {
+    const s = orq.aplicar(ctx.coletor.retrato()).sessoes.find((x) => x.chave === chave);
+    assert.equal(s.estado, 'encerrada');
+    assert.equal(s.retomavel, false, 'o painel não oferece retomar');
+    assert.equal((await orq.executar(cmd('retomar', chave), { visto: { projeto: s.projeto, nome: s.nome ?? null } })).erro, erro);
+  }
+  assert.equal(orq.abertas(), 1, 'só o vizinho abriu');
+});
+
+test('R4: sessão comandada que o coletor ainda não vê sai com última resposta e origem da tarefa nulas', async (t) => {
+  const ctx = preparar(t);
+  const chave = await abrir(ctx, { nome: 'sintetica' });
+  const s = ctx.publicada(chave);
+  assert.equal(s.gerenciada, true);
+  for (const campo of ['ultimaResposta', 'ultimaRespostaEm', 'tarefaOrigem', 'tarefa']) {
+    assert.ok(Object.hasOwn(s, campo), `${campo} ausente`);
+    assert.equal(s[campo], null, campo);
+  }
+
+  // A que morreu com erro e também não está no coletor sai do mesmo jeito.
+  await mensagem(ctx, chave, 'morre');
+  await ate(() => ctx.publicada(chave)?.erro, 'erro publicado');
+  const morta = ctx.publicada(chave);
+  for (const campo of ['ultimaResposta', 'ultimaRespostaEm', 'tarefaOrigem']) assert.equal(morta[campo], null, campo);
 });
 
 // ---------------------------------------------------------------- visto

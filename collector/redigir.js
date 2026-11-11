@@ -74,6 +74,19 @@ export function redigir(texto, max = 200) {
 const INVISIVEIS = /(?![\n\t ])[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\p{Zs}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}]/gu;
 const escapar = (c) => `\\u{${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}}`;
 
+// Formas de esconder parte de um pedido na tela do celular (S14/A2): muitas linhas, linhas em branco
+// em fila (3 quebras com só espaço ou tabulação entre elas), espaço ou tabulação em fila, ou no fim de linha.
+const MAX_LINHAS_INTEIRO = 30;
+const ESCONDE = [/\n[ \t]*\n[ \t]*\n/, /[ \t]{16,}/, /[ \t](\n|$)/];
+
+// Verdadeiro se o texto publicado pode estar escondendo conteúdo: um pedido assim não conta como inteiro.
+// O que não for texto também não conta como inteiro.
+export function escondeConteudo(texto) {
+  if (typeof texto !== 'string') return true;
+  if (texto.split('\n').length > MAX_LINHAS_INTEIRO) return true;
+  return ESCONDE.some((re) => re.test(texto));
+}
+
 // Redação de um bloco de texto (pedido de permissão): mantém quebras de linha, tabulações e espaços,
 // mascara os mesmos padrões de `redigir`, escapa os caracteres invisíveis e corta em `max`.
 // `alterado` diz se qualquer uma dessas coisas mudou o texto: o chamador não pode tratar como inteiro o que mudou.

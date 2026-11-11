@@ -12,10 +12,11 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { nomeConta } from './sessoes.js';
 import { executarEncerrar, logDeEncerramento } from './encerrar.js';
 import { hashVisto } from './assinatura.js';
-import { redigir, redigirBloco } from './redigir.js';
+import { escondeConteudo, redigir, redigirBloco } from './redigir.js';
 import { diaLocal } from './transcript.js';
 
 export const MODELOS = ['haiku', 'sonnet', 'opus', 'fable'];
@@ -47,6 +48,10 @@ const RE_NOME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const RE_CONTA = /^[a-z0-9]{1,20}$/;
 const RE_CHAVE = /^([a-z0-9]{1,20}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SENSIVEL = /\.config\/moises|\.local\/state\/moises|\.ssh\b|\bprintenv\b|(^|[\s;&|])env(\s|$)|\.claude\/settings|\.git\/hooks|credentials/;
+// Comando de Bash com caractere fora de ASCII imprimível (homóglifo, letra acentuada, invisível) também é sensível (S26).
+const FORA_DO_ASCII = /[^\x20-\x7E\n\t]/;
+// A raiz do repositório onde este coletor roda (a pasta acima de collector/).
+const RAIZ_COLETOR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // Campos de entrada do Bash que não mudam o que roda: com eles, o painel mostra só o comando.
 const CAMPOS_BASH_SIMPLES = new Set(['command', 'description', 'timeout']);
 const AMBIENTE = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SHELL', 'TMPDIR'];
@@ -65,11 +70,13 @@ const ERROS = {
   projeto: 'Projeto fora da lista deste computador.',
   conta: 'Conta desconhecida neste computador.',
   tetoSessoes: (n) => `Já há ${n} sessões comandadas abertas; encerre uma antes de abrir outra.`,
-  tetoDia: (n) => `Limite de ${n} sessões abertas pelo painel hoje atingido.`,
+  tetoDia: (n) => `Limite de ${n} aberturas e retomadas pelo painel hoje atingido.`,
   contagem: 'Não foi possível registrar a abertura neste computador; nada foi aberto.',
   naoComandada: 'Esta sessão não foi aberta pelo Moisés; só é possível ver e encerrar.',
   naoPendente: 'Este pedido de permissão não está mais pendente.',
   incompleto: 'Este pedido não coube inteiro no painel; só é possível negar.',
+  sensivel: 'Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue.',
+  pastaColetor: 'Esta pasta contém o próprio Moisés; abra-a só pelo terminal.',
   hash: 'O pedido mudou desde que apareceu no painel; atualize e confira de novo.',
   aindaAberta: 'A sessão ainda está aberta; encerre antes de retomar.',
   saindo: 'A sessão já está sendo encerrada.',
@@ -172,6 +179,7 @@ export class Orquestrador {
     esperaFimMs = 10_000,
     esperaTermMs = 5000,
     kill = null,
+    pastaColetor = RAIZ_COLETOR,
   } = {}) {
     // As mensagens de erro não citam o valor recebido (argsExtra pode trazer um prompt inteiro).
     if (!Array.isArray(argsExtra) || argsExtra.some((a) => typeof a !== 'string' || ARG_PROIBIDO.test(a))) {
@@ -200,6 +208,8 @@ export class Orquestrador {
     this.esperaFimMs = esperaFimMs;
     this.esperaTermMs = esperaTermMs;
     this.opcoesEncerrar = kill ? { kill } : {};
+    // Caminho real; se não der para resolver, o caminho absoluto como veio (a recusa continua valendo para ele).
+    this.pastaColetor = pastaReal(pastaColetor) ?? path.resolve(String(pastaColetor));
     this.sessoes = new Map(); // chave → registro do processo comandado
     this.falhas = new Map(); // chave → { erro, em, ... } de sessão comandada que morreu sozinha
     this.cwdCache = new Map(); // chave de sessão encerrada → pasta (para `retomavel`, sem reler a cada ciclo)
@@ -247,6 +257,7 @@ export class Orquestrador {
     const lista = this.lerProjetos();
     const cwd = Object.hasOwn(lista, projeto) ? pastaReal(lista[projeto]) : null;
     if (!cwd) return falha(ERROS.projeto);
+    if (this.contemColetor(cwd)) return falha(ERROS.pastaColetor);
     const dir = RE_CONTA.test(conta) ? this.coletor.dirs.find((d) => nomeConta(d) === conta) : null;
     if (!dir) return falha(ERROS.conta);
     // Daqui até registrar a sessão não há `await`: dois comandos simultâneos não furam os tetos.
@@ -285,6 +296,8 @@ export class Orquestrador {
       return falha(ERROS.naoPendente);
     }
     if (decisao === 'aprovar') {
+      // Pedido sensível só se aprova no computador; pelo painel, só negar.
+      if (p.sensivel) return falha(ERROS.sensivel);
       if (!p.completo) return falha(ERROS.incompleto);
       if (typeof vistoHash !== 'string' || vistoHash !== p.hash) return falha(ERROS.hash);
     }
@@ -335,6 +348,7 @@ export class Orquestrador {
     }
     const cwd = this.pastaPermitida(bruta, this.lerProjetos());
     if (!cwd) return falha(ERROS.pasta);
+    if (this.contemColetor(cwd)) return falha(ERROS.pastaColetor);
     const teto = this.conferirTetos();
     if (teto) return falha(teto);
     if (!this.contarAbertura()) return falha(ERROS.contagem);
@@ -377,7 +391,8 @@ export class Orquestrador {
           }
           this.cwdCache.set(s.chave, c);
         }
-        s.retomavel = this.pastaPermitida(this.cwdCache.get(s.chave), (lista ??= this.lerProjetos())) != null;
+        const pasta = this.pastaPermitida(this.cwdCache.get(s.chave), (lista ??= this.lerProjetos()));
+        s.retomavel = pasta != null && !this.contemColetor(pasta);
       }
       const f = this.falhas.get(s.chave);
       if (f) s.erro = f.erro;
@@ -434,7 +449,9 @@ export class Orquestrador {
     if (conta !== 'principal') env.CLAUDE_CONFIG_DIR = dir;
     let filho;
     try {
-      filho = spawn(this.claudeBin, args, { cwd, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+      // `detached`: o filho lidera um grupo de processos próprio, e os sinais de encerramento vão para o
+      // grupo inteiro, alcançando os netos (comandos que o Bash deixou em segundo plano) (S18).
+      filho = spawn(this.claudeBin, args, { cwd, env, shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch {
       return null;
     }
@@ -451,6 +468,7 @@ export class Orquestrador {
       vivo: true,
       saindo: false, // encerrar ou fechar pediu o fim: o fim não é erro
       morto: false, // morto pelo coletor (init divergente, demora): a saída que ainda chegar é ignorada
+      initConferido: false, // até o primeiro `init` conferido, nenhum pedido de permissão vale
       stderr: '',
       linhasIgnoradas: 0,
       custo: 0,
@@ -480,6 +498,9 @@ export class Orquestrador {
     // `exit` garante o fim do registro pouco depois.
     filho.on('exit', (codigo, sinal) => {
       rec.saida ??= { codigo, sinal };
+      // A sessão acabou: o que ainda sobrar no grupo dela (netos) morre junto. Só o grupo, nunca o pid,
+      // que já pode ter sido reaproveitado.
+      this.sinalizar(rec, 'SIGKILL', { soGrupo: true });
       setTimeout(() => this.finalizar(rec), 1000).unref();
     });
     filho.on('close', (codigo, sinal) => {
@@ -530,14 +551,14 @@ export class Orquestrador {
       rec.linhasIgnoradas++;
       return;
     }
-    if (ev.type === 'system' && ev.subtype === 'init' && !this.initConfere(rec, ev)) {
-      rec.erro = ERROS.init;
-      this.matar(rec);
-      this.avisar(rec, falha(ERROS.init));
-      return;
+    if (ev.type === 'system' && ev.subtype === 'init') {
+      if (!this.initConfere(rec, ev)) return this.initDivergiu(rec);
+      rec.initConferido = true;
     }
     if (ev.type === 'control_request') this.pedidoDeControle(rec, ev);
     else if (ev.type === 'result') {
+      // Um turno inteiro sem `init`: a configuração da sessão nunca foi conferida (S19).
+      if (!rec.initConferido) return this.initDivergiu(rec);
       // O turno acabou: um pedido que ainda estivesse na lista não vale mais.
       for (const pedido of [...rec.pendentes.keys()]) this.tirarPendente(rec, pedido);
       rec.estado = 'esperando_mensagem';
@@ -545,6 +566,13 @@ export class Orquestrador {
     }
     // Outros tipos (assistant, user, rate_limit_event, control_response, system de outro subtipo): só contam como sinal de vida.
     this.avisar(rec, { ok: true });
+  }
+
+  // Configuração diferente da esperada (ou nunca mostrada): mata o filho e devolve o erro do `init`.
+  initDivergiu(rec) {
+    rec.erro = ERROS.init;
+    this.matar(rec);
+    this.avisar(rec, falha(ERROS.init));
   }
 
   initConfere(rec, ev) {
@@ -570,18 +598,25 @@ export class Orquestrador {
       this.escrever(rec, { type: 'control_response', response: { subtype: 'success', request_id: id, response: { behavior: 'deny', message: 'Pedido em formato inesperado.' } } });
       return;
     }
+    // Sem um `init` conferido, o modo de permissão e as ferramentas não foram vistos: negado na hora, sem publicar (S19).
+    if (!rec.initConferido) {
+      this.escrever(rec, { type: 'control_response', response: { subtype: 'success', request_id: id, response: { behavior: 'deny', message: 'Sessão sem configuração conferida.' } } });
+      return;
+    }
     const nomeOk = typeof req.tool_name === 'string' && RE_FERRAMENTA.test(req.tool_name);
     const ferramenta = nomeOk ? req.tool_name : '?';
     const textoCompleto = textoDoPedido(ferramenta, req.input);
     const { texto, alterado } = redigirBloco(textoCompleto, 4000);
     const subirTexto = process.env.MOISES_SUBIR_TEXTO !== '0';
     const entrada = subirTexto ? texto : '';
+    const comandoBash = ferramenta === 'Bash' && ehObjeto(req.input) && typeof req.input.command === 'string' ? req.input.command : null;
     const p = {
       pedido: id,
       ferramenta,
       entrada,
-      completo: subirTexto && nomeOk && !alterado && ehObjeto(req.input),
-      sensivel: SENSIVEL.test(textoCompleto),
+      // Inteiro só se nada foi mascarado, cortado ou escapado e se o texto não tem jeito de esconder parte de si (S14).
+      completo: subirTexto && nomeOk && !alterado && ehObjeto(req.input) && !escondeConteudo(texto),
+      sensivel: SENSIVEL.test(textoCompleto) || (comandoBash !== null && FORA_DO_ASCII.test(comandoBash)),
       criadoEm: this.agora(),
       hash: hashVisto(ferramenta, entrada),
       input: req.input,
@@ -626,8 +661,24 @@ export class Orquestrador {
     } catch {
       /* já fechado */
     }
+    this.sinalizar(rec, 'SIGKILL');
+  }
+
+  // Manda o sinal ao grupo de processos da sessão; se o grupo não existir, ao próprio filho.
+  // O pid tem de ser de verdade (> 1): `kill(-0)` e `kill(-1)` atingiriam o coletor ou todos os processos.
+  sinalizar(rec, sinal, { soGrupo = false } = {}) {
+    const pid = rec.filho?.pid;
+    if (Number.isSafeInteger(pid) && pid > 1) {
+      try {
+        process.kill(-pid, sinal);
+        return;
+      } catch {
+        /* grupo inexistente: cai para o pid */
+      }
+    }
+    if (soGrupo) return;
     try {
-      rec.filho.kill('SIGKILL');
+      rec.filho.kill(sinal);
     } catch {
       /* já morreu */
     }
@@ -645,9 +696,9 @@ export class Orquestrador {
       /* já fechado */
     }
     if (await comPrazo(saiu, this.esperaFimMs)) return true;
-    rec.filho.kill('SIGTERM');
+    this.sinalizar(rec, 'SIGTERM');
     if (await comPrazo(saiu, this.esperaTermMs)) return true;
-    rec.filho.kill('SIGKILL');
+    this.sinalizar(rec, 'SIGKILL');
     return comPrazo(saiu, 5000);
   }
 
@@ -709,6 +760,9 @@ export class Orquestrador {
       projeto: r.projeto,
       nome: r.nome,
       tarefa: null,
+      tarefaOrigem: null,
+      ultimaResposta: null,
+      ultimaRespostaEm: null,
       status,
       retomavel: false,
       custo: 0,
@@ -784,6 +838,13 @@ export class Orquestrador {
       if (rel && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..') return real;
     }
     return null;
+  }
+
+  // Verdadeiro se a pasta (caminho real) é a do coletor ou fica acima dela: uma sessão ali poderia
+  // reescrever o próprio coletor (S23).
+  contemColetor(real) {
+    const rel = path.relative(real, this.pastaColetor);
+    return rel === '' || (!path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..');
   }
 
   conferirTetos() {
