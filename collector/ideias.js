@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { escreverAtomico } from './auditoria.js';
 import { diaLocal } from './transcript.js';
 
 const INTERVALO_MIN_MS = 10 * 60_000; // por sessão
@@ -109,10 +110,7 @@ export class Ideias {
 
   // Grava num temporário e renomeia: um corte no meio não zera o teto diário.
   salvar() {
-    fs.mkdirSync(this.pasta, { recursive: true, mode: 0o700 });
-    const tmp = `${this.arquivo}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.d), { mode: 0o600 });
-    fs.renameSync(tmp, this.arquivo);
+    escreverAtomico(this.arquivo, JSON.stringify(this.d));
   }
 
   assinatura(s) {

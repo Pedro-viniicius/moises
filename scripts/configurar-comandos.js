@@ -15,8 +15,10 @@
 // Lê o coletor.env só para isso; não toca em coletor.env, vercel.env nem senha-painel.txt.
 import fs from 'node:fs';
 import path from 'node:path';
-import { impressaoDaPublica, pedidoDeAparelho, chavePublica, RE_KID } from '../collector/assinatura.js';
-import { caminhosDoColetor } from '../collector/index.js';
+import { impressaoDaPublica, pedidoDeAparelho, chavePublica } from '../collector/assinatura.js';
+import { escreverAtomico } from '../collector/auditoria.js';
+import { caminhosDoColetor } from '../collector/config.js';
+import { objetoSimples, RE_KID } from '../collector/contrato.js';
 
 const local = caminhosDoColetor({ avisar: (m) => console.error(`Aviso: ${m.replace(/^\[coletor\] /, '')}`) });
 const pastaEstado = local.pastaEstado;
@@ -40,7 +42,6 @@ function sair(mensagem) {
   process.exit(1);
 }
 
-const objetoSimples = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const limpo = (texto) => (typeof texto === 'string' ? texto.replace(INVISIVEIS, '') : '');
 const quando = (ms) => (Number.isFinite(ms) ? fmtHora.format(new Date(ms)).replace(',', '') : '?');
 // Antes de tudo, o arquivo que vai ser lido ou alterado: o mesmo que o coletor carrega (SE-M4).
@@ -93,17 +94,9 @@ function criar600(arquivo, texto) {
   }
 }
 
-// Grava por arquivo temporário e rename: quem lê (o coletor) nunca vê o arquivo pela metade.
+// Grava por arquivo temporário (600, com fsync) e rename: quem lê (o coletor) nunca vê o arquivo pela metade.
 function gravarChaves(json) {
-  const tmp = `${arqChaves}.${process.pid}.tmp`;
-  fs.rmSync(tmp, { force: true });
-  try {
-    criar600(tmp, `${JSON.stringify(json, null, 2)}\n`);
-    fs.renameSync(tmp, arqChaves);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
+  escreverAtomico(arqChaves, `${JSON.stringify(json, null, 2)}\n`, { fsync: true });
 }
 
 function pedidos() {
@@ -200,7 +193,6 @@ function autorizar(kid, impressaoDigitada) {
     sair(`Já existe um aparelho autorizado com o kid ${kid}; nada foi alterado. Se ele não vale mais, revogue antes com --revogar ${kid}.`);
   }
   const mesmoRotulo = Object.entries(chaves).filter(([k, e]) => RE_KID.test(k) && objetoSimples(e) && limpo(e.rotulo) === rotulo).map(([k]) => k);
-  fs.mkdirSync(path.dirname(arqChaves), { recursive: true, mode: 0o700 });
   try {
     chaves[kid] = { rotulo: pedido.rotulo, publica: pedido.publica, criadaEm: new Date().toISOString() };
     gravarChaves(chaves);

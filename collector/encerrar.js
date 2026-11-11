@@ -4,10 +4,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { processoConfere, inicioDoProcesso, nomeConta } from './sessoes.js';
+import { escreverAtomico } from './auditoria.js';
+import { processoConfere, inicioDoProcesso, partirChave, dirDaConta } from './sessoes.js';
 import { diaLocal } from './transcript.js';
 
-export const EXPIRA_MS = 120_000;
+// Validade do pedido de encerrar: a mesma regra de 2 min de EXPIRA_CMD_MS em api/_lib.js (lá, o comando
+// ainda pendente no servidor expira).
+const EXPIRA_MS = 120_000;
 // Lido a cada uso: a variável pode chegar do coletor.env depois da importação.
 export function maxPorHora() {
   const bruto = process.env.MOISES_ENCERRAR_POR_HORA;
@@ -82,19 +85,11 @@ export function reiniciarLimites() {
 }
 // Devolve false se não conseguiu gravar: quem chama recusa a ação (falha fechada).
 function gravarLimites() {
-  const tmp = `${arqLimites}.tmp`;
   try {
-    fs.mkdirSync(path.dirname(arqLimites), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tmp, JSON.stringify({ executados: [...executados].slice(-200), recentes }), { mode: 0o600 });
-    fs.renameSync(tmp, arqLimites);
+    escreverAtomico(arqLimites, JSON.stringify({ executados: [...executados].slice(-200), recentes }));
     return true;
   } catch (err) {
     console.error(`[encerrar] não gravou os limites (${err?.code || 'erro'}); o pedido foi recusado.`);
-    try {
-      fs.rmSync(tmp, { force: true });
-    } catch {
-      /* nada a limpar */
-    }
     return false;
   }
 }
@@ -114,13 +109,11 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
   while (recentes.length && agora() - recentes[0] > 3600_000) recentes.shift();
   if (recentes.length >= porHora) return { ok: false, erro: `Limite de ${porHora} encerramentos por hora atingido.` };
 
-  const sep = String(cmd.chave || '').indexOf(':');
-  if (sep < 1) return { ok: false, erro: 'Pedido sem sessão válida.' };
-  const conta = cmd.chave.slice(0, sep);
-  const sessionId = cmd.chave.slice(sep + 1);
-  const dir = coletor.dirs.find((d) => nomeConta(d) === conta);
+  const partes = partirChave(cmd.chave);
+  if (!partes) return { ok: false, erro: 'Pedido sem sessão válida.' };
+  const dir = dirDaConta(coletor.dirs, partes.conta);
   if (!dir) return { ok: false, erro: 'Conta desconhecida neste computador.' };
-  const reg = coletor.registroDe(dir, sessionId);
+  const reg = coletor.registroDe(dir, partes.id);
   if (!reg) return { ok: false, erro: 'A sessão não está registrada como aberta.' };
   if (reg.procStart == null) return { ok: false, erro: 'Registro sem início do processo; nada foi feito.' };
   if (!processoConfere(reg, { estrito: true })) return { ok: false, erro: 'O processo da sessão já terminou.' };

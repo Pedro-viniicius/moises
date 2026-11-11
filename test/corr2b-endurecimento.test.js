@@ -428,7 +428,7 @@ test('CA5: uma só regex de kid (6 hexadecimais minúsculos), exportada por coll
   for (const ok of ['ab2cd3', '000000', 'ffffff']) assert.equal(col.RE_KID.test(ok), true, ok);
   for (const ruim of ['AB2CD3', 'zzzzzz', 'ab2cd', 'ab2cd30', 'ab2cdg', ' ab2cd3', 'ab2cd3\n']) assert.equal(col.RE_KID.test(ruim), false, JSON.stringify(ruim));
   const fonte = fs.readFileSync(fileURLToPath(new URL('../collector/comandos.js', import.meta.url)), 'utf8');
-  assert.match(fonte, /import \{[^}]*\bRE_KID\b[^}]*\} from '\.\/assinatura\.js'/);
+  assert.match(fonte, /import \{[^}]*\bRE_KID\b[^}]*\} from '\.\/contrato\.js'/);
   assert.ok(!/const RE_KID\s*=/.test(fonte), 'comandos.js não tem regex de kid própria');
 });
 

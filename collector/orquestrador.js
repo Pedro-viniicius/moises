@@ -14,15 +14,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { nomeConta } from './sessoes.js';
+import { dirDaConta } from './sessoes.js';
 import { executarEncerrar, logDeEncerramento } from './encerrar.js';
 import { hashVisto } from './assinatura.js';
+import { escreverAtomico } from './auditoria.js';
+import { ESFORCOS, MODELOS, MODOS, RE_CHAVE, TIPOS, objetoSimples } from './contrato.js';
 import { escondeConteudo, redigir, redigirBloco } from './redigir.js';
 import { diaLocal } from './transcript.js';
 
-export const MODELOS = ['haiku', 'sonnet', 'opus', 'fable'];
-export const ESFORCOS = ['low', 'medium', 'high', 'xhigh', 'max'];
-export const MODOS = ['manual', 'acceptEdits', 'plan'];
+// As listas e a chave de sessão vêm de collector/contrato.js; reexportadas para quem já as importava daqui.
+export { ESFORCOS, MODELOS, MODOS, RE_CHAVE };
 export const FERRAMENTAS_PADRAO = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep'];
 
 // O modo que o `init` tem de mostrar para cada modo pedido.
@@ -54,9 +55,6 @@ const RE_FERRAMENTA = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_PEDIDO = /^[A-Za-z0-9_.:-]{1,80}$/;
 const RE_NOME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
 const RE_CONTA = /^[a-z0-9]{1,20}$/;
-// Chave de sessão `<conta>:<uuid>`. Também é a regex de sessão do porteiro (collector/comandos.js): sem
-// flag `g`, os grupos não mudam o resultado de `test`.
-export const RE_CHAVE = /^([a-z0-9]{1,20}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const SENSIVEL = /\.config\/moises|\.local\/state\/moises|\.ssh\b|\bprintenv\b|(^|[\s;&|])env(\s|$)|\.claude\/settings|\.git\/hooks|credentials/;
 // Comando de Bash com caractere fora de ASCII imprimível (homóglifo, letra acentuada, invisível) também é sensível (S26).
 const FORA_DO_ASCII = /[^\x20-\x7E\n\t]/;
@@ -113,7 +111,6 @@ const ERROS = {
   naoEncerrou: 'O processo da sessão não respondeu ao pedido de encerrar.',
 };
 const falha = (erro) => ({ ok: false, erro });
-const ehObjeto = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const textoValido = (v, max) => typeof v === 'string' && v.length >= 1 && v.length <= max;
 
 // Resolve `p` dentro de `ms`: true se resolveu, false se o prazo passou. Não deixa temporizador para trás.
@@ -171,7 +168,7 @@ function lerLinhas(stream, aoLer) {
 
 // O que o painel mostra de um pedido: o comando, no Bash simples; senão a entrada inteira em JSON.
 function textoDoPedido(ferramenta, input) {
-  if (ferramenta === 'Bash' && ehObjeto(input) && typeof input.command === 'string' && Object.keys(input).every((k) => CAMPOS_BASH_SIMPLES.has(k))) {
+  if (ferramenta === 'Bash' && objetoSimples(input) && typeof input.command === 'string' && Object.keys(input).every((k) => CAMPOS_BASH_SIMPLES.has(k))) {
     return input.command;
   }
   return JSON.stringify(input ?? null, null, 2) ?? '';
@@ -222,7 +219,7 @@ function citaCaminho(texto, formas) {
 }
 
 function vistoConfere(visto, real) {
-  if (!ehObjeto(visto) || typeof visto.projeto !== 'string' || visto.projeto.length > MAX_VISTO) return false;
+  if (!objetoSimples(visto) || typeof visto.projeto !== 'string' || visto.projeto.length > MAX_VISTO) return false;
   if (!(visto.nome === null || (typeof visto.nome === 'string' && visto.nome.length <= MAX_VISTO))) return false;
   return visto.projeto === real.projeto && visto.nome === (real.nome ?? null);
 }
@@ -302,10 +299,10 @@ export class Orquestrador {
 
   async executar(cmd, dados) {
     if (this.fechado) return falha(ERROS.fechado);
-    if (!ehObjeto(dados)) return falha(ERROS.dados);
+    if (!objetoSimples(dados)) return falha(ERROS.dados);
     const tipo = cmd?.tipo;
     if (tipo === 'abrir') return this.abrir(dados);
-    if (!['mensagem', 'permissao', 'interromper', 'encerrar', 'retomar'].includes(tipo)) return falha(ERROS.verbo);
+    if (!TIPOS.includes(tipo)) return falha(ERROS.verbo);
     const alvo = this.alvo(cmd, dados);
     if (alvo.erro) return falha(alvo.erro);
     if (tipo === 'mensagem') return this.mensagem(alvo, dados);
@@ -340,7 +337,7 @@ export class Orquestrador {
     const cwd = Object.hasOwn(lista, projeto) ? pastaReal(lista[projeto]) : null;
     if (!cwd) return falha(ERROS.projeto);
     if (this.contemColetor(cwd)) return falha(ERROS.pastaColetor);
-    const dir = RE_CONTA.test(conta) ? this.coletor.dirs.find((d) => nomeConta(d) === conta) : null;
+    const dir = RE_CONTA.test(conta) ? dirDaConta(this.coletor.dirs, conta) : null;
     if (!dir) return falha(ERROS.conta);
     // Daqui até registrar a sessão não há `await`: dois comandos simultâneos não furam os tetos.
     const teto = this.conferirTetos();
@@ -429,7 +426,7 @@ export class Orquestrador {
     } catch {
       bruta = null;
     }
-    const cwd = this.pastaPermitida(bruta, this.lerProjetos());
+    const cwd = this.pastaPermitida(bruta, this.basesDosProjetos(this.lerProjetos()));
     if (!cwd) return falha(ERROS.pasta);
     if (this.contemColetor(cwd)) return falha(ERROS.pastaColetor);
     const teto = this.conferirTetos();
@@ -453,9 +450,14 @@ export class Orquestrador {
     const sessoes = retrato.sessoes;
     const agora = this.agora();
     for (const [chave, f] of this.falhas) if (agora - f.em > GUARDA_FALHA_MS) this.falhas.delete(chave);
-    let lista = null;
+    // Pastas reais dos projetos: resolvidas uma vez por ciclo, e só se houver sessão encerrada para conferir.
+    let bases = null;
     const vistas = new Set();
+    // Chaves cuja pasta fica no cwdCache: as encerradas no retrato e não comandadas (vale a primeira
+    // ocorrência da chave no retrato).
+    const retidas = new Set();
     for (const s of sessoes) {
+      const primeira = !vistas.has(s.chave);
       vistas.add(s.chave);
       const rec = this.sessoes.get(s.chave);
       if (rec) {
@@ -465,6 +467,7 @@ export class Orquestrador {
       }
       s.retomavel = false;
       if (s.estado === 'encerrada') {
+        if (primeira) retidas.add(s.chave);
         if (!this.cwdCache.has(s.chave)) {
           let c = null;
           try {
@@ -474,17 +477,14 @@ export class Orquestrador {
           }
           this.cwdCache.set(s.chave, c);
         }
-        const pasta = this.pastaPermitida(this.cwdCache.get(s.chave), (lista ??= this.lerProjetos()));
+        const pasta = this.pastaPermitida(this.cwdCache.get(s.chave), (bases ??= this.basesDosProjetos(this.lerProjetos())));
         s.retomavel = pasta != null && !this.contemColetor(pasta);
       }
       const f = this.falhas.get(s.chave);
       if (f) s.erro = f.erro;
     }
     // A pasta de uma sessão só é guardada enquanto ela está encerrada e no retrato.
-    for (const chave of this.cwdCache.keys()) {
-      const s = sessoes.find((x) => x.chave === chave);
-      if (!s || s.estado !== 'encerrada' || this.sessoes.has(chave)) this.cwdCache.delete(chave);
-    }
+    for (const chave of this.cwdCache.keys()) if (!retidas.has(chave)) this.cwdCache.delete(chave);
     for (const rec of this.sessoes.values()) if (!vistas.has(rec.chave)) sessoes.push({ ...this.sintetica(rec, 'ativa'), ...this.publico(rec) });
     for (const [chave, f] of this.falhas) {
       if (vistas.has(chave) || this.sessoes.has(chave)) continue;
@@ -639,7 +639,7 @@ export class Orquestrador {
       rec.linhasIgnoradas++;
       return;
     }
-    if (!ehObjeto(ev)) {
+    if (!objetoSimples(ev)) {
       rec.linhasIgnoradas++;
       return;
     }
@@ -682,7 +682,7 @@ export class Orquestrador {
   pedidoDeControle(rec, ev) {
     const req = ev.request;
     const id = ev.request_id;
-    if (!ehObjeto(req) || req.subtype !== 'can_use_tool') {
+    if (!objetoSimples(req) || req.subtype !== 'can_use_tool') {
       this.escrever(rec, { type: 'control_response', response: { subtype: 'error', request_id: id, error: 'não suportado' } });
       return;
     }
@@ -703,13 +703,13 @@ export class Orquestrador {
     const { texto, alterado } = redigirBloco(textoCompleto, 4000);
     const subirTexto = process.env.MOISES_SUBIR_TEXTO !== '0';
     const entrada = subirTexto ? texto : '';
-    const comandoBash = ferramenta === 'Bash' && ehObjeto(req.input) && typeof req.input.command === 'string' ? req.input.command : null;
+    const comandoBash = ferramenta === 'Bash' && objetoSimples(req.input) && typeof req.input.command === 'string' ? req.input.command : null;
     const p = {
       pedido: id,
       ferramenta,
       entrada,
       // Inteiro só se nada foi mascarado, cortado ou escapado e se o texto não tem jeito de esconder parte de si (S14).
-      completo: subirTexto && nomeOk && !alterado && ehObjeto(req.input) && !escondeConteudo(texto),
+      completo: subirTexto && nomeOk && !alterado && objetoSimples(req.input) && !escondeConteudo(texto),
       sensivel:
         SENSIVEL.test(textoCompleto) ||
         citaCaminho(textoCompleto, this.formasProtegidas) ||
@@ -920,7 +920,7 @@ export class Orquestrador {
     const m = RE_CHAVE.exec(typeof cmd.chave === 'string' ? cmd.chave : '');
     if (!m) return { erro: ERROS.sessao };
     const [chave, conta, sessionId] = m;
-    const dir = this.coletor.dirs.find((d) => nomeConta(d) === conta);
+    const dir = dirDaConta(this.coletor.dirs, conta);
     if (!dir) return { erro: ERROS.conta };
     const rec = this.sessoes.get(chave) || null;
     const real = this.sessaoReal(chave, rec);
@@ -932,19 +932,23 @@ export class Orquestrador {
   lerProjetos() {
     try {
       const p = this.projetos();
-      return ehObjeto(p) ? p : {};
+      return objetoSimples(p) ? p : {};
     } catch {
       return {};
     }
   }
 
-  // A pasta resolvida tem de ser a de um projeto da lista ou estar dentro de <projeto>/.claude/worktrees/.
-  pastaPermitida(cwd, lista) {
+  // Pastas reais dos projetos da lista (as que não existem ficam de fora), para `pastaPermitida`.
+  basesDosProjetos(lista) {
+    return Object.values(lista).map(pastaReal).filter(Boolean);
+  }
+
+  // A pasta resolvida tem de ser a de um projeto (`bases`, de `basesDosProjetos`) ou estar dentro de
+  // <projeto>/.claude/worktrees/.
+  pastaPermitida(cwd, bases) {
     const real = pastaReal(cwd);
     if (!real) return null;
-    for (const caminho of Object.values(lista)) {
-      const base = pastaReal(caminho);
-      if (!base) continue;
+    for (const base of bases) {
       if (real === base) return real;
       const rel = path.relative(path.join(base, '.claude', 'worktrees'), real);
       if (rel && !path.isAbsolute(rel) && rel.split(path.sep)[0] !== '..') return real;
@@ -989,7 +993,7 @@ export class Orquestrador {
     } catch {
       /* corrompido; a mensagem do JSON.parse cita o conteúdo e não vai para o log */
     }
-    if (ehObjeto(c) && typeof c.dia === 'string') {
+    if (objetoSimples(c) && typeof c.dia === 'string') {
       if (c.dia !== dia) return { dia, n: 0 };
       if (Number.isSafeInteger(c.n) && c.n >= 0) return { dia, n: c.n };
     }
@@ -1030,19 +1034,10 @@ export class Orquestrador {
   // Grava a contagem (temporário + rename, permissão 600). Devolve null, ou o código do erro (sem caminho
   // nem conteúdo) se não conseguir.
   gravarContagem(dia, n) {
-    const arq = this.arqContagem();
-    const tmp = `${arq}.${process.pid}.tmp`;
     try {
-      fs.mkdirSync(this.pastaEstado, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(tmp, JSON.stringify({ dia, n }), { mode: 0o600 });
-      fs.renameSync(tmp, arq);
+      escreverAtomico(this.arqContagem(), JSON.stringify({ dia, n }));
       return null;
     } catch (err) {
-      try {
-        fs.rmSync(tmp, { force: true });
-      } catch {
-        /* nada a limpar */
-      }
       return err?.code || 'erro';
     }
   }

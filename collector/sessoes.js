@@ -18,6 +18,18 @@ export function diretoriosDeConfig(home = os.homedir()) {
 
 export const nomeConta = (dir) => path.basename(dir).replace(/^\.claude-?/, '') || 'principal';
 
+// Chave do painel `<conta>:<id>` separada no primeiro ':': { conta, id }, ou null se não for texto ou não
+// tiver conta antes do ':'. Não confere o formato da conta nem do id: quem precisa disso usa RE_CHAVE.
+export function partirChave(chave) {
+  if (typeof chave !== 'string') return null;
+  const sep = chave.indexOf(':');
+  if (sep < 1) return null;
+  return { conta: chave.slice(0, sep), id: chave.slice(sep + 1) };
+}
+
+// Diretório de configuração da conta (pelo nome, como em `nomeConta`); undefined se nenhum for dela.
+export const dirDaConta = (dirs, conta) => dirs.find((d) => nomeConta(d) === conta);
+
 // Início do processo em ticks (campo 22 de /proc/<pid>/stat), o mesmo valor que o Claude grava em procStart.
 export function inicioDoProcesso(pid) {
   try {
@@ -295,10 +307,10 @@ export class Coletor {
   // descontando as respostas que pertencem a sessões de origem mais antigas.
   // (A origem só é reconhecida se estiver na janela das últimas 26 h.)
   sessaoDe(chavePainel) {
-    const sep = chavePainel.indexOf(':');
-    const conta = chavePainel.slice(0, sep);
-    const id = chavePainel.slice(sep + 1);
-    const dir = this.dirs.find((d) => nomeConta(d) === conta);
+    const partes = partirChave(chavePainel);
+    if (!partes) return null;
+    const { id } = partes;
+    const dir = dirDaConta(this.dirs, partes.conta);
     if (!dir) return null;
     const agora = this.agora();
     if (agora - this.indiceEm > 60_000 || !this.indice.has(`${dir}|${id}`)) this.reindexar();
@@ -318,11 +330,10 @@ export class Coletor {
   // Pasta de trabalho da sessão: a do registro de um processo vivo ou, na falta dele, a do transcript.
   // Só caminho absoluto serve. Devolve null se a sessão não existe ou não tem pasta conhecida.
   cwdDe(chavePainel) {
-    const sep = String(chavePainel ?? '').indexOf(':');
-    if (sep < 1) return null;
-    const conta = chavePainel.slice(0, sep);
-    const id = chavePainel.slice(sep + 1);
-    const dir = this.dirs.find((d) => nomeConta(d) === conta);
+    const partes = partirChave(chavePainel);
+    if (!partes) return null;
+    const { id } = partes;
+    const dir = dirDaConta(this.dirs, partes.conta);
     if (!dir) return null;
     const absoluto = (c) => (typeof c === 'string' && path.isAbsolute(c) ? c : null);
     const reg = this.registroDe(dir, id);

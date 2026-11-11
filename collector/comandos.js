@@ -6,12 +6,12 @@
 // assinatura; S11: teto por minuto só para assinatura válida; R1: data no futuro também gasta o teto).
 import fs from 'node:fs';
 import path from 'node:path';
-import { assinaturaConfere, chavePublica, impressaoDaPublica, RE_ASSINATURA, RE_KID } from './assinatura.js';
-import { pastaSoDoDono } from './auditoria.js';
-// Uma só fonte para o que o orquestrador também confere: listas de modelo, esforço e modo, e a chave de sessão.
-import { ESFORCOS, MODELOS, MODOS, RE_CHAVE as RE_SESSAO } from './orquestrador.js';
+import { assinaturaConfere, chavePublica, impressaoDaPublica } from './assinatura.js';
+import { escreverAtomico } from './auditoria.js';
+// Uma só fonte para o contrato: verbos, listas de modelo, esforço e modo, e as regex de chave, kid e assinatura.
+import { ESFORCOS, MODELOS, MODOS, RE_ASSINATURA, RE_CHAVE, RE_KID, TIPOS, objetoSimples } from './contrato.js';
 
-export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
+export { TIPOS };
 export const JANELA_MS = 120_000;
 export const FOLGA_FUTURO_MS = 30_000;
 export const GUARDA_IDS_MS = 600_000;
@@ -25,8 +25,8 @@ const ARQ_VISTOS = 'comandos-vistos.json';
 const MAX_DADOS = 8_000;
 const MAX_ROTULO = 40;
 
-// Campos do comando (conferidos antes da assinatura). O kid e a assinatura usam as regex de
-// collector/assinatura.js; a chave de sessão, a de collector/orquestrador.js.
+// Campos do comando (conferidos antes da assinatura). O kid, a assinatura e a chave de sessão usam as regex
+// de collector/contrato.js.
 // A assinatura é ECDSA SHA-256 em IEEE P1363 (64 bytes) e base64url sem '=' (tarefa 15, achado A1): a
 // assinatura HMAC do código do aparelho (43 caracteres) não vale mais e cai no formato.
 const RE_ID = /^c_[0-9a-f]{16}$/;
@@ -60,7 +60,6 @@ const ERROS = {
 // antes da janela (achado Q1).
 const ERRO_ATRASADO = 'O relógio do aparelho está atrasado; acerte a hora e tente de novo.';
 
-const objetoSimples = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const desligado = () => process.env.MOISES_COMANDOS === '0';
 
 // ---------- Chaveiro ----------
@@ -259,7 +258,7 @@ function formatoConfere(c) {
   if (typeof c.kid !== 'string' || !RE_KID.test(c.kid)) return false;
   if (typeof c.id !== 'string' || !RE_ID.test(c.id)) return false;
   if (typeof c.tipo !== 'string' || !RE_TIPO.test(c.tipo)) return false;
-  const chaveOk = typeof c.chave === 'string' && RE_SESSAO.test(c.chave);
+  const chaveOk = typeof c.chave === 'string' && RE_CHAVE.test(c.chave);
   if (c.tipo === 'abrir') {
     if (c.chave !== null) return false;
   } else if (TIPOS.includes(c.tipo)) {
@@ -387,7 +386,7 @@ export class Porteiro {
       const erro = !ok && typeof fim?.erro === 'string' && fim.erro ? fim.erro : null;
       if (ok && c.tipo === 'abrir') {
         const nova = fim?.chaveNova;
-        c.chave = typeof nova === 'string' && RE_SESSAO.test(nova) ? nova : null;
+        c.chave = typeof nova === 'string' && RE_CHAVE.test(nova) ? nova : null;
       }
       this.#auditar(c, ap ? `${kid} (${ap.rotulo})` : kid, ok ? 'feito' : 'falhou', null, erro);
     } catch (err) {
@@ -449,26 +448,11 @@ export class Porteiro {
   // arquivo temporário e rename. Devolve false se não conseguiu gravar.
   #gravarVistos(agora) {
     for (const [id, instante] of this.vistos) if (agora - instante > GUARDA_IDS_MS) this.vistos.delete(id);
-    const tmp = `${this.arqVistos}.${process.pid}.tmp`;
-    let fd = null;
     try {
-      pastaSoDoDono(this.pastaEstado);
-      fd = fs.openSync(tmp, 'w', 0o600);
-      fs.fchmodSync(fd, 0o600);
-      fs.writeSync(fd, JSON.stringify(Object.fromEntries(this.vistos)));
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fd = null;
-      fs.renameSync(tmp, this.arqVistos);
+      escreverAtomico(this.arqVistos, JSON.stringify(Object.fromEntries(this.vistos)), { fsync: true });
       return true;
     } catch (err) {
       console.error(`porteiro: não foi possível gravar os comandos vistos (${err?.code || 'erro'}).`);
-      if (fd !== null) fs.closeSync(fd);
-      try {
-        fs.rmSync(tmp, { force: true });
-      } catch {
-        /* nada a limpar */
-      }
       return false;
     }
   }

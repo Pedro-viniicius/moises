@@ -16,7 +16,9 @@ export const K = {
 
 const COOKIE = 'moises';
 const VALIDADE_S = 30 * 24 * 3600;
-export const EXPIRA_CMD_MS = 120_000;
+// Comando pendente há 2 min expira: a mesma regra de EXPIRA_MS em collector/encerrar.js (lá, o pedido de
+// encerrar mais velho que isso é recusado).
+const EXPIRA_CMD_MS = 120_000;
 
 // ---------- Comandos ----------
 // O servidor só transporta: confere formato, nunca a assinatura (a chave fica no aparelho e no coletor).
@@ -33,7 +35,7 @@ export const MAX_PENDENTES = 20;
 // O painel guarda a chave pública que o aparelho gerou; o coletor a leva para o computador, onde o dono
 // confere a impressão digital e autoriza pelo terminal. O servidor só transporta (achado A1).
 export const MAX_PEDIDOS_APARELHO = 5;
-export const VALIDADE_PEDIDO_APARELHO_MS = 3_600_000;
+const VALIDADE_PEDIDO_APARELHO_MS = 3_600_000;
 
 // Separa os pedidos guardados (resultado de HGETALL) em válidos (mais novos que 1 h) e vencidos.
 export function pedidosDeAparelho(hashArr, agora) {

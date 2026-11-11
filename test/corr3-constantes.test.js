@@ -1,5 +1,6 @@
 // Correção final (CR7/CR8): cada constante do contrato tem uma só fonte. O porteiro (collector/comandos.js)
-// importa listas e regex do orquestrador e da assinatura, e a rota de aparelho importa o kid de api/_lib.js.
+// importa listas e regex de collector/contrato.js (limpeza do /simplify), e a rota de aparelho importa o kid
+// de api/_lib.js.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,8 +15,8 @@ test('CA6: collector/comandos.js não redefine listas nem regex que já são exp
   for (const nome of ['MODELOS', 'ESFORCOS', 'MODOS', 'RE_SESSAO', 'RE_ASSINATURA', 'RE_KID']) {
     assert.doesNotMatch(src, new RegExp(`^const ${nome}\\s*=`, 'm'), nome);
   }
-  assert.match(src, /import \{[^}]*\bMODELOS\b[^}]*\} from '\.\/orquestrador\.js'/);
-  assert.match(src, /import \{[^}]*\bRE_ASSINATURA\b[^}]*\} from '\.\/assinatura\.js'/);
+  assert.match(src, /import \{[^}]*\bMODELOS\b[^}]*\} from '\.\/contrato\.js'/);
+  assert.match(src, /import \{[^}]*\bRE_ASSINATURA\b[^}]*\} from '\.\/contrato\.js'/);
 });
 
 test('CA6: api/aparelho.js usa o RE_KID de api/_lib.js', () => {

@@ -5,6 +5,7 @@
 // metadados do comando, cortados e sem caracteres de controle.
 // Contrato no PLANO, tarefas 3 e 12; recusas agregadas pelo achado S11.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const MINUTO_MS = 60_000;
@@ -38,10 +39,54 @@ const nomeDasRecusas = (arquivo) => path.join(path.dirname(arquivo), `${path.bas
 
 // Cria a pasta só para o dono e, se ela já existir mais aberta e for deste usuário, fecha para 700:
 // quem pudesse apagar arquivos dela (comandos-vistos.json) desarmaria a proteção contra repetição.
+// Caminho real, ou o caminho absoluto se ele não existe (uma pasta pessoal que não existe não é esta pasta).
+function caminhoReal(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
 export function pastaSoDoDono(pasta) {
   fs.mkdirSync(pasta, { recursive: true, mode: 0o700 });
+  // Nunca a pasta pessoal nem a raiz: um arquivo de configuração posto direto em ~ não fecha a casa inteira.
+  const real = fs.realpathSync(pasta);
+  if (real === path.parse(real).root || real === caminhoReal(os.homedir())) return;
   const st = fs.statSync(pasta);
   if (st.isDirectory() && (st.mode & 0o077) !== 0 && st.uid === process.getuid?.()) fs.chmodSync(pasta, 0o700);
+}
+
+// Grava `texto` em `arquivo` de uma vez: num temporário novo (<arquivo>.<pid>.tmp, criado exclusivo e com
+// permissão 600) e rename, para quem lê nunca ver o arquivo pela metade. A pasta é garantida por
+// pastaSoDoDono; com `fsync`, os dados vão ao disco antes do rename. No erro, apaga o temporário e relança
+// o erro original: o log (só com o código do erro) fica com quem chama.
+export function escreverAtomico(arquivo, texto, { fsync = false } = {}) {
+  const tmp = `${arquivo}.${process.pid}.tmp`;
+  let fd = null;
+  try {
+    pastaSoDoDono(path.dirname(arquivo));
+    fs.rmSync(tmp, { force: true });
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, texto);
+    if (fsync) fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmp, arquivo);
+  } catch (err) {
+    try {
+      if (fd !== null) fs.closeSync(fd);
+    } catch {
+      /* já fechado */
+    }
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* nada a limpar */
+    }
+    throw err;
+  }
 }
 
 export class Auditoria {

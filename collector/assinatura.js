@@ -4,6 +4,10 @@
 // está no PLANO ("Contrato comum" e tarefa 15). Formato dos campos, aparelho, validade e repetição ficam
 // no porteiro (collector/comandos.js).
 import crypto from 'node:crypto';
+import { objetoSimples, RE_ASSINATURA, RE_KID } from './contrato.js';
+
+// O kid e o formato da assinatura vêm de collector/contrato.js; reexportados para quem já os importava daqui.
+export { RE_ASSINATURA, RE_KID };
 
 const PREFIXO = 'moises-cmd-v1';
 const TAMANHO_KID = 6;
@@ -11,11 +15,6 @@ const TAMANHO_IMPRESSAO = 16;
 const TAMANHO_PUBLICA = 65; // 0x04 || x (32) || y (32)
 const TAMANHO_ASSINATURA = 64; // IEEE P1363: r (32) || s (32)
 export const RE_PUBLICA = /^[A-Za-z0-9_-]{87}$/;
-// Formato da assinatura (64 bytes em base64url sem '='). O porteiro (collector/comandos.js) usa esta.
-export const RE_ASSINATURA = /^[A-Za-z0-9_-]{86}$/;
-// O kid: 6 hexadecimais minúsculos (o começo do SHA-256 da pública). A única regex de kid do coletor:
-// o porteiro e o chaveiro (collector/comandos.js) usam esta (SE-B3).
-export const RE_KID = /^[0-9a-f]{6}$/;
 const MAX_ROTULO = 40;
 // Controle, formatação (inclusive direção de texto) e separadores de linha: nada disso num rótulo.
 const INVISIVEL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
@@ -95,7 +94,7 @@ export function rotuloValido(rotulo) {
 // { kid, publica, rotulo, criadoEm } se tudo for coerente (o kid é o da própria chave pública e o ponto
 // está na curva), ou null.
 export function pedidoDeAparelho(p) {
-  if (p === null || typeof p !== 'object' || Array.isArray(p)) return null;
+  if (!objetoSimples(p)) return null;
   const { kid, publica, rotulo, criadoEm } = p;
   if (typeof kid !== 'string' || !RE_KID.test(kid)) return null;
   const id = impressaoDaPublica(publica);

@@ -12,7 +12,7 @@ const REGISTRO = 'comandos';
 const RE_KID = /^[0-9a-f]{6}$/;
 const RE_PUBLICA = /^[A-Za-z0-9_-]{87}$/;
 
-export class CofreIndisponivel extends Error {
+class CofreIndisponivel extends Error {
   constructor() {
     super('IndexedDB indisponível.');
     this.name = 'CofreIndisponivel';
