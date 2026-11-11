@@ -1,14 +1,164 @@
-'use strict';
+// Painel do Moisés: sessões, histórico e comandos assinados neste aparelho (módulo ES, sem dependências).
+// Regras da tela em docs/orquestracao/SPEC-interface.md. A CSP exige Trusted Types: nenhum innerHTML, todo
+// texto vindo do coletor entra por textContent. Nada de texto de sessão em console.*.
+import { normalizarCodigo, derivarChave, assinarComando, hashVisto } from './assinatura.js';
+import { guardar, obter, esquecer } from './cofre.js';
 
 const TZ = 'America/Sao_Paulo';
 const INTERVALO_MS = 15000;
+const INTERVALO_RAPIDO_MS = 2000; // enquanto houver comando a caminho
+const RETRY_MS = 5000;
 const COLETOR_PARADO_MS = 120000;
+const VISIVEL_MS = 5 * 60_000; // a linha de andamento fica 5 min depois do envio
+const AVISO_PARADO_MS = 20_000;
+// Depois disso um comando não acelera mais a consulta (o servidor só expira pendentes quando o coletor volta).
+const LIMITE_ANDAMENTO_MS = { pendente: 3 * 60_000, recebido: 11 * 60_000 };
+const MAX_TEXTO = 6000; // mensagem e pedido inicial (contrato)
+const CONTADOR_DESDE = 5000;
+const MAX_DADOS = 8000; // tamanho da string `dados` aceito pelo servidor
+const RE_CODIGO = /^[abcdefghjkmnpqrstuvwxyz23456789]{22}$/;
+const RE_NOME = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}$/;
+const TITULO = 'Moisés · Sessões do Claude Code';
+
+/* ---------- Textos ---------- */
+
+const TEXTOS = {
+  semCodigo: 'Comando não enviado: falta o código do aparelho.',
+  codigoPrimeira: 'Este aparelho ainda não pode mandar comandos ao seu computador. Digite o código que o computador gerou para ele. O código não fica guardado: só uma chave que não pode ser copiada permanece neste aparelho.',
+  codigoTroca: 'Digite o novo código. Ele substitui o que está guardado neste aparelho.',
+  codigoMalFormado: 'O código tem 22 letras e números. Confira e tente de novo.',
+  semIndexedDB: 'Este navegador não deixou guardar o código. Saia do modo privado e tente de novo.',
+  semCripto: 'Este navegador não oferece a criptografia que os comandos exigem. Abra o painel pelo endereço https e tente de novo.',
+  codigoGuardado: 'Código guardado neste aparelho.',
+  aparelhoEsquecido: 'Aparelho esquecido.',
+  desligadoSemDados: 'Comandos desligados: o coletor ainda não enviou dados.',
+  desligadoForaDoAr: (h) => 'Comandos desligados: o coletor está fora do ar desde ' + h + '.',
+  desligadoOrquestracao: 'Comandos desligados: a orquestração está desligada neste computador.',
+  desligadoCripto: 'Comandos desligados: este navegador não oferece a criptografia que os comandos exigem (abra o painel por https).',
+  bannerSemDados: 'O coletor ainda não enviou dados. Sem ele não dá para mandar comandos.',
+  bannerForaDoAr: (h) => 'O coletor está fora do ar desde ' + h + '. Você vê o último estado conhecido, mas não pode mandar comandos.',
+  estadoAntigo: (h) => 'Estado de ' + h + '. Pode estar desatualizado.',
+  erroRede: 'Não enviado: sem conexão. Tente de novo.',
+  erro400: 'Não enviado: o pedido está inválido.',
+  erro409: 'Este pedido já tinha sido enviado.',
+  erro413: 'Não enviado: o pedido ficou grande demais. Encurte o texto e tente de novo.',
+  erro429: 'Há pedidos demais esperando o coletor. Espere alguns instantes e tente de novo.',
+  erroOutro: 'Não enviado: erro ao falar com o painel.',
+  erroAssinar: 'Não enviado: não foi possível assinar o pedido neste aparelho.',
+  semResposta: 'Esta sessão ainda não respondeu.',
+  notaOcultoResposta: 'Trechos marcados [oculto] foram escondidos por segurança antes de sair do computador.',
+  notaCorte: 'Resposta cortada em 1.200 caracteres.',
+  naoComandada: 'Esta sessão foi aberta fora do Moisés. Daqui dá para acompanhar e encerrar. Para mandar mensagens pelo painel, encerre e toque em Retomar.',
+  naoComandadaPermissao: 'Esta sessão está esperando permissão no terminal onde foi aberta.',
+  encerradaRetomavel: 'Sessão encerrada. Toque em Retomar para continuar a conversa por aqui.',
+  encerradaNaoRetomavel: 'Sessão encerrada. A pasta do projeto não está na lista de projetos permitidos deste computador, então não dá para retomar pelo painel.',
+  encerrada: 'Sessão encerrada.',
+  msgTrabalhando: 'A sessão está trabalhando. Espere terminar ou toque em Interromper.',
+  msgPermissao: 'Responda ao pedido de permissão acima antes de mandar outra mensagem.',
+  msgAnterior: 'Aguarde a mensagem anterior chegar à sessão.',
+  msgLonga: 'A mensagem passa de 6.000 caracteres.',
+  msgDevolvida: 'Sua mensagem foi devolvida à caixa.',
+  permSensivel: ' Este pedido mexe com chaves, senhas ou configuração do Moisés ou do Claude Code. Aprove só se foi você quem pediu isso.',
+  permIncompleto: 'Este pedido não coube inteiro no painel; só é possível negar.',
+  permOculto: 'Trechos marcados [oculto] foram escondidos por segurança.',
+  permRespondido: 'Resposta enviada. Aguardando o coletor.',
+  permForaDoAr: 'O coletor está fora do ar. Este pedido pode já ter sido resolvido.',
+  aguardeVerbo: (verbo) => 'Aguarde: já existe um pedido de ' + verbo + ' em andamento.',
+  confInterromper: 'Interromper o que a sessão está fazendo agora? A sessão continua aberta e você pode mandar outra mensagem.',
+  confEncerrarTitulo: 'Encerrar esta sessão?',
+  confEncerrarComandada: 'O processo será fechado no computador. Você pode retomar a conversa depois.',
+  confEncerrarManual: 'O Claude Code desta sessão será finalizado no computador, inclusive no terminal onde ele está aberto. Trabalho que não foi salvo pode se perder. Você pode retomar a conversa pelo painel depois.',
+  confRetomar: 'Retomar esta conversa no computador?',
+  foraDoArPedido: ' O coletor está fora do ar. O pedido vale por 2 minutos e depois expira.',
+  expirado: 'O coletor não buscou o pedido em 2 minutos, então ele expirou e não foi executado. Tente de novo quando o coletor voltar.',
+  novaProjetosVazio: 'Nenhum projeto permitido neste computador. Adicione projetos ao arquivo projetos.json, em ~/.config/moises.',
+  novaLimite: (n) => 'Limite de ' + n + ' sessões abertas pelo painel. Encerre uma para abrir outra.',
+  novaFrase: (abertas, max) => 'O Claude vai trabalhar na pasta do projeto, neste modo, no seu computador. Ele roda isolado: sem seus plugins, MCP, skills e comandos de barra, só com as ferramentas básicas. Sessões abertas pelo painel: ' + abertas + ' de ' + max + '.',
+  novaErros: (n) => 'Corrija ' + n + (n === 1 ? ' campo' : ' campos') + ' para continuar.',
+  erroProjeto: 'Escolha um projeto.',
+  erroPedido: 'Escreva o pedido inicial.',
+  erroPedidoLongo: 'O pedido passa de 6.000 caracteres.',
+  erroNome: 'Use só letras, números, espaço, ponto, hífen e sublinhado, começando por letra ou número.',
+};
+
+// Frases da linha de andamento por verbo (spec, item 6).
+const FRASES = {
+  mensagem: {
+    pendente: 'Mensagem enviada. Aguardando o coletor…',
+    recebido: 'O coletor recebeu a mensagem. Entregando à sessão…',
+    feito: 'Mensagem entregue à sessão.',
+    recusado: 'O coletor recusou a mensagem: ',
+    falhou: 'A mensagem não foi entregue: ',
+  },
+  permissao: {
+    pendente: 'Resposta enviada. Aguardando o coletor…',
+    recebido: 'O coletor recebeu a resposta. Entregando à sessão…',
+    feito: 'Resposta entregue à sessão.',
+    recusado: 'O coletor recusou a resposta: ',
+    falhou: 'A resposta não foi entregue: ',
+  },
+  interromper: {
+    pendente: 'Pedido de interrupção enviado…',
+    recebido: 'O coletor recebeu. Interrompendo…',
+    feito: 'Sessão interrompida. Ela espera a sua próxima mensagem.',
+    recusado: 'O coletor recusou o pedido de interrupção: ',
+    falhou: 'A sessão não foi interrompida: ',
+  },
+  encerrar: {
+    pendente: 'Encerrando… aguardando o coletor.',
+    recebido: 'O coletor recebeu. Encerrando a sessão…',
+    feito: 'Encerrada. Log salvo no Histórico.',
+    recusado: 'O coletor recusou o pedido de encerrar: ',
+    falhou: 'Não encerrou: ',
+  },
+  retomar: {
+    pendente: 'Pedido de retomada enviado…',
+    recebido: 'O coletor recebeu. Retomando…',
+    feito: 'Sessão retomada.',
+    recusado: 'O coletor recusou o pedido de retomada: ',
+    falhou: 'A sessão não foi retomada: ',
+  },
+  abrir: {
+    pendente: 'Pedido de nova sessão enviado…',
+    recebido: 'O coletor recebeu. Abrindo a sessão…',
+    feito: 'Sessão aberta. Ela aparece na lista em instantes.',
+    recusado: 'O coletor recusou o pedido de nova sessão: ',
+    falhou: 'A sessão não foi aberta: ',
+  },
+};
+
+// Texto da recusa escolhido só pelo `motivo`, nunca procurando palavras no `erro`.
+const MOTIVOS = {
+  assinatura: 'o código deste aparelho não foi aceito pelo computador.',
+  aparelho: 'o código deste aparelho não foi aceito pelo computador.',
+  relogio: 'a hora deste aparelho está diferente da do computador. Acerte a data e a hora do celular (ajuste automático) e tente de novo.',
+  expirado: 'o pedido demorou mais de 2 minutos para chegar e não foi executado. Tente de novo.',
+  repetido: 'este pedido já tinha sido recebido.',
+  ritmo: 'pedidos demais em pouco tempo. Espere um minuto e tente de novo.',
+  desligado: 'os comandos estão desligados neste computador.',
+  sem_chave: 'o computador não tem nenhum código de aparelho configurado.',
+  formato: 'o pedido veio em formato inválido.',
+  verbo: 'este tipo de pedido não é aceito.',
+  interno: 'erro interno do coletor. Tente de novo; se repetir, veja o log no computador.',
+};
+const SEM_MOTIVO = 'motivo não informado.';
+
+const MODELOS = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
+const ESFORCOS = { low: 'Baixo', medium: 'Médio', high: 'Alto', xhigh: 'Muito alto', max: 'Máximo' };
+const MODOS = {
+  manual: { rotulo: 'Perguntar antes de agir', ajuda: 'A sessão pede a sua permissão antes de editar arquivos ou rodar comandos.' },
+  acceptEdits: { rotulo: 'Aceitar edições', ajuda: 'Edita arquivos sem perguntar; comandos ainda pedem permissão.' },
+  plan: { rotulo: 'Só planejar', ajuda: 'A sessão só propõe um plano, sem mudar nada.' },
+};
+
+/* ---------- Formatação ---------- */
 
 const fmtMoeda = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'USD' });
 const fmtHora = new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
 const fmtDataHora = new Intl.DateTimeFormat('pt-BR', {
   timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
 });
+const fmtDia = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 const fmtInt = new Intl.NumberFormat('pt-BR');
 const fmtDec = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
@@ -21,12 +171,22 @@ function el(tag, classe, texto) {
   return e;
 }
 
-/* ---------- Formatação ---------- */
+function botao(texto, classe = 'btn') {
+  const b = el('button', classe, texto);
+  b.type = 'button';
+  return b;
+}
+
+let seqDom = 0;
+const idDom = (prefixo) => prefixo + '-' + (++seqDom);
 
 const moeda = (v) => fmtMoeda.format(Number.isFinite(v) ? v : 0);
 const dataValida = (ms) => Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime());
 const hora = (ms) => (dataValida(ms) ? fmtHora.format(new Date(ms)) : '—');
 const dataHora = (ms) => (dataValida(ms) ? fmtDataHora.format(new Date(ms)).replace(',', '') : '—');
+const hojeSP = () => fmtDia.format(new Date());
+// "às 14:32" hoje; "12/11 14:32" em outro dia.
+const quando = (ms) => (fmtDia.format(new Date(ms)) === hojeSP() ? 'às ' + hora(ms) : dataHora(ms));
 
 function tempoRel(ms) {
   const min = Math.max(0, Math.floor((Date.now() - ms) / 60000));
@@ -71,23 +231,35 @@ function modeloLegivel(m) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function hojeSP() {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date());
-}
+const rotuloDe = (mapa, v) => mapa[v] || String(v).charAt(0).toUpperCase() + String(v).slice(1);
 
 function nomePadrao(s) {
   const base = s.tarefa ? String(s.tarefa).slice(0, 60) : (s.nome || '');
   return hojeSP() + ' ' + (s.projeto || '') + ' – ' + base;
 }
 
-const STATUS = {
-  ativa: { rotulo: 'Ativa' },
-  aguardando: { rotulo: 'Aguardando você' },
-  ociosa: { rotulo: 'Ociosa' },
-  encerrada: { rotulo: 'Encerrada' },
+// Selo pelo `estado` novo; sem ele (coletor antigo), pelo `status` de antes.
+const ESTADOS = {
+  trabalhando: { rotulo: 'Trabalhando', classe: 'ativa' },
+  esperando_mensagem: { rotulo: 'Esperando você', classe: 'aguardando' },
+  esperando_permissao: { rotulo: 'Pedindo permissão', classe: 'permissao' },
+  parada: { rotulo: 'Parada', classe: 'ociosa' },
+  encerrada: { rotulo: 'Encerrada', classe: 'encerrada' },
 };
+const STATUS = {
+  ativa: { rotulo: 'Ativa', classe: 'ativa' },
+  aguardando: { rotulo: 'Aguardando você', classe: 'aguardando' },
+  ociosa: { rotulo: 'Ociosa', classe: 'ociosa' },
+  encerrada: { rotulo: 'Encerrada', classe: 'encerrada' },
+};
+
+function seloDe(s) {
+  if (s.estado != null) return ESTADOS[s.estado] || { rotulo: String(s.estado), classe: 'ociosa' };
+  return STATUS[s.status] || { rotulo: s.status || '—', classe: 'ociosa' };
+}
+
+const estaEncerrada = (s) => (s.estado != null ? s.estado === 'encerrada' : s.status === 'encerrada');
+const lista = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []);
 
 /* ---------- Rede ---------- */
 
@@ -119,10 +291,188 @@ const estado = {
   filtro: 'abertas',
   aba: 'sessoes',
   cartoes: new Map(), // chave -> objeto do cartão
-  pendentesLocais: new Map(), // chave -> comando otimista
+  pendentesLocais: new Map(), // id -> comando aceito pelo servidor que ainda não voltou em /api/estado
+  textosEnviados: new Map(), // id -> texto da mensagem, para devolver à caixa se o comando não chegar
+  kid: null, // aparelho guardado neste navegador (só o identificador público)
 };
 
-/* ---------- Resumo ---------- */
+const criptoDisponivel = () => !!(window.isSecureContext && globalThis.crypto && globalThis.crypto.subtle);
+const orquestracao = () => (estado.dados && estado.dados.retrato && estado.dados.retrato.orquestracao) || null;
+
+function coletorParado() {
+  const d = estado.dados;
+  return !d || !d.retrato || !d.recebidoEm || Date.now() - d.recebidoEm > COLETOR_PARADO_MS;
+}
+
+// Por que nenhum comando pode sair agora (null = pode). Ordem: coletor fora do ar, orquestração desligada.
+function motivoBloqueio() {
+  const d = estado.dados;
+  if (!d || !d.retrato) return TEXTOS.desligadoSemDados;
+  if (coletorParado()) return TEXTOS.desligadoForaDoAr(hora(d.recebidoEm));
+  const o = orquestracao();
+  if (!o || o.ativa !== true) return TEXTOS.desligadoOrquestracao;
+  if (!criptoDisponivel()) return TEXTOS.desligadoCripto;
+  return null;
+}
+
+/* ---------- Comandos ---------- */
+
+// Lista do servidor mais os enviados por este aparelho que ainda não apareceram nela.
+function todosComandos() {
+  const doServidor = (estado.dados && estado.dados.comandos) || [];
+  const ids = new Set(doServidor.map((c) => c.id));
+  for (const [id, local] of estado.pendentesLocais) {
+    if (ids.has(id) || Date.now() - local.criadoEm > LIMITE_ANDAMENTO_MS.recebido) estado.pendentesLocais.delete(id);
+  }
+  return [...doServidor, ...estado.pendentesLocais.values()];
+}
+
+function maisNovo(cmds) {
+  let achado = null;
+  for (const c of cmds) if (!achado || c.criadoEm > achado.criadoEm) achado = c;
+  return achado;
+}
+
+const comandosDe = (chave) => todosComandos().filter((c) => c.chave === chave);
+const comandoDe = (chave) => maisNovo(comandosDe(chave));
+const comandoAbrir = () => maisNovo(todosComandos().filter((c) => c.tipo === 'abrir'));
+
+function emAndamento(c) {
+  const limite = c && LIMITE_ANDAMENTO_MS[c.estado];
+  return !!limite && Date.now() - c.criadoEm < limite;
+}
+
+const verboEmAndamento = (chave, tipo) => comandosDe(chave).some((c) => c.tipo === tipo && emAndamento(c));
+const haComandoEmAndamento = () => todosComandos().some(emAndamento);
+
+function textoHttp(status) {
+  if (status === 400) return TEXTOS.erro400;
+  if (status === 409) return TEXTOS.erro409;
+  if (status === 413) return TEXTOS.erro413;
+  if (status === 429) return TEXTOS.erro429;
+  return TEXTOS.erroOutro;
+}
+
+// Única saída de comandos do painel. `sessao` é a sessão como o cartão a mostrava no toque (null em abrir);
+// dela sai o `visto`. Em aprovar, `exibido` traz a ferramenta e a entrada como estão na tela, e delas sai o
+// `vistoHash`. Devolve { ok: true, id } ou { ok: false, erro } com o texto para mostrar perto do controle.
+async function enviarComando(tipo, sessao, dados = {}, { exibido = null } = {}) {
+  const bloqueio = motivoBloqueio();
+  if (bloqueio) return { ok: false, erro: bloqueio };
+  const aparelho = await chaveDoAparelho();
+  if (!aparelho) return { ok: false, erro: TEXTOS.semCodigo };
+
+  const corpo = { ...dados };
+  let cmd;
+  try {
+    if (tipo === 'permissao' && dados.decisao === 'aprovar') {
+      if (!exibido) return { ok: false, erro: TEXTOS.erro400 };
+      corpo.vistoHash = await hashVisto(exibido.ferramenta, exibido.entrada);
+    }
+    if (sessao) corpo.visto = { projeto: sessao.projeto, nome: sessao.nome ?? null };
+    cmd = await assinarComando(aparelho, { tipo, chave: sessao ? sessao.chave : null, dados: corpo });
+  } catch {
+    return { ok: false, erro: TEXTOS.erroAssinar };
+  }
+  if (cmd.dados.length > MAX_DADOS) return { ok: false, erro: TEXTOS.erro413 };
+
+  let r;
+  try {
+    r = await api('/api/comando', jsonOpcoes('POST', cmd));
+  } catch (e) {
+    if (e instanceof NaoAutorizado) return { ok: false, erro: null };
+    return { ok: false, erro: TEXTOS.erroRede };
+  }
+  if (!r.ok || !r.dados || r.dados.id !== cmd.id) return { ok: false, erro: textoHttp(r.status) };
+
+  estado.pendentesLocais.set(cmd.id, {
+    id: cmd.id, tipo, chave: cmd.chave, estado: 'pendente', erro: null, motivo: null, criadoEm: cmd.criadoEm,
+  });
+  carregarEstado();
+  return { ok: true, id: cmd.id };
+}
+
+// Texto, passos e pistas de um comando para a linha de andamento.
+function descreverComando(c) {
+  const f = FRASES[c.tipo] || FRASES.mensagem;
+  switch (c.estado) {
+    case 'pendente': {
+      let texto = f.pendente;
+      if (coletorParado() && Date.now() - c.criadoEm > AVISO_PARADO_MS) texto += TEXTOS.foraDoArPedido;
+      return { passos: ['feito', 'atual', 'futuro'], texto, falha: false };
+    }
+    case 'recebido': return { passos: ['feito', 'feito', 'atual'], texto: f.recebido, falha: false };
+    case 'feito': return { passos: ['feito', 'feito', 'feito'], texto: f.feito, falha: false };
+    case 'recusado': {
+      const razao = MOTIVOS[c.motivo] || (c.erro ? String(c.erro) : SEM_MOTIVO);
+      return {
+        passos: ['feito', 'Recusado', null],
+        texto: f.recusado + razao,
+        falha: true,
+        pedirCodigo: c.motivo === 'assinatura' || c.motivo === 'aparelho',
+      };
+    }
+    case 'falhou':
+      return { passos: ['feito', 'feito', 'Falhou'], texto: f.falhou + (c.erro ? String(c.erro) : SEM_MOTIVO), falha: true };
+    case 'expirado':
+      return { passos: ['feito', 'Expirado', null], texto: TEXTOS.expirado, falha: true };
+    default:
+      return null;
+  }
+}
+
+/* ---------- Linha de andamento ---------- */
+
+const ROTULOS_PASSOS = ['Enviado', 'Recebido', 'Executado'];
+
+function criarAndamento() {
+  const raiz = el('div', 'andamento');
+  const passos = el('ol', 'passos');
+  passos.setAttribute('aria-hidden', 'true');
+  passos.hidden = true;
+  const itens = ROTULOS_PASSOS.map(() => passos.appendChild(el('li', 'passo')));
+  // A frase é o que o leitor de tela ouve: só muda quando o comando muda de estado.
+  const frase = el('p', 'acao-estado');
+  frase.setAttribute('role', 'status');
+  frase.setAttribute('aria-live', 'polite');
+  const alerta = el('p', 'acao-estado erro');
+  alerta.setAttribute('role', 'alert');
+  const nota = el('p', 'meta');
+  nota.hidden = true;
+  const codigo = botao('Digitar o código de novo', 'btn btn-leve');
+  codigo.hidden = true;
+  codigo.addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
+  raiz.append(passos, frase, alerta, nota, codigo);
+  return { raiz, passos, itens, frase, alerta, nota, codigo, marca: null };
+}
+
+function atualizarAndamento(a, cmd, nota = null) {
+  const visivel = !!cmd && (emAndamento(cmd) || Date.now() - cmd.criadoEm < VISIVEL_MS);
+  const d = visivel ? descreverComando(cmd) : null;
+  a.passos.hidden = !d;
+  a.nota.hidden = !d || !nota;
+  if (d && nota) a.nota.textContent = nota;
+  a.codigo.hidden = !d || !d.pedirCodigo;
+
+  const marca = d ? cmd.id + '|' + d.texto : null;
+  if (marca === a.marca) return;
+  a.marca = marca;
+  a.frase.textContent = d && !d.falha ? d.texto : '';
+  a.alerta.textContent = d && d.falha ? d.texto : '';
+  if (!d) return;
+  d.passos.forEach((p, i) => {
+    const li = a.itens[i];
+    li.hidden = p === null;
+    if (p === null) return;
+    const rotulo = ROTULOS_PASSOS[i];
+    if (p === 'feito') { li.className = 'passo passo-feito'; li.textContent = '✓ ' + rotulo; }
+    else if (p === 'atual') { li.className = 'passo passo-atual'; li.textContent = rotulo; }
+    else if (p === 'futuro') { li.className = 'passo'; li.textContent = rotulo; }
+    else { li.className = 'passo passo-falha'; li.textContent = '✕ ' + p; }
+  });
+}
+
+/* ---------- Resumo, banner e título ---------- */
 
 function renderResumo() {
   const d = estado.dados;
@@ -144,6 +494,12 @@ function renderResumo() {
     top.hidden = true;
   }
 
+  const pedindo = sessoes.filter((s) => s.estado === 'esperando_permissao').length;
+  const perm = $('resumo-permissao');
+  perm.hidden = !pedindo;
+  if (pedindo) perm.textContent = pedindo + ' esperando permissão';
+  document.title = pedindo ? '(' + pedindo + ') ' + TITULO : TITULO;
+
   const ideias = $('resumo-ideias');
   if (r && r.custoIdeiasHoje > 0) {
     ideias.textContent = 'ideias: ' + moeda(r.custoIdeiasHoje);
@@ -153,7 +509,7 @@ function renderResumo() {
   }
 
   const col = $('coletor');
-  const parado = !r || !d.recebidoEm || Date.now() - d.recebidoEm > COLETOR_PARADO_MS;
+  const parado = coletorParado();
   col.classList.toggle('alerta', parado);
   if (!r) {
     col.textContent = 'Coletor ainda não enviou dados';
@@ -162,42 +518,16 @@ function renderResumo() {
   } else {
     col.textContent = 'coletor ok · atualizado ' + hora(d.recebidoEm);
   }
-}
 
-/* ---------- Comandos ---------- */
-
-function comandoDe(chave) {
-  const lista = (estado.dados && estado.dados.comandos) || [];
-  let achado = null;
-  for (const c of lista) {
-    if (c.chave === chave && (!achado || c.criadoEm > achado.criadoEm)) achado = c;
-  }
-  const local = estado.pendentesLocais.get(chave);
-  if (!local) return achado;
-  // Quando o servidor já devolve o mesmo pedido, vale o estado dele (pendente → feito/falhou).
-  const doServidor = lista.find((c) => c.id === local.id);
-  if (doServidor) {
-    estado.pendentesLocais.delete(chave);
-    return doServidor;
-  }
-  if (!achado || achado.criadoEm < local.criadoEm) achado = local;
-  return achado;
-}
-
-function textoComando(c) {
-  switch (c.estado) {
-    case 'pendente': return { texto: 'Encerrando… (aguardando o coletor)', erro: false };
-    case 'feito': return { texto: 'Encerrada. Log salvo no Histórico.', erro: false };
-    case 'falhou': return { texto: 'Não encerrou: ' + (c.erro || 'erro desconhecido'), erro: true };
-    case 'expirado': return { texto: 'Pedido expirou: o coletor não respondeu em 2 min', erro: true };
-    default: return null;
-  }
+  const banner = $('banner-coletor');
+  banner.hidden = !parado;
+  if (parado) banner.textContent = r ? TEXTOS.bannerForaDoAr(hora(d.recebidoEm)) : TEXTOS.bannerSemDados;
 }
 
 /* ---------- Cartões ---------- */
 
 function criarCartao(s) {
-  const c = { chave: s.chave, expandido: false, sessao: s, confirmando: null, erroLocal: null };
+  const c = { chave: s.chave, expandido: false, sessao: s, confirmando: null };
 
   const li = el('li');
   const art = el('article', 'cartao');
@@ -223,16 +553,13 @@ function criarCartao(s) {
 
   const detalhe = el('div', 'detalhe');
   detalhe.hidden = true;
-  const idDet = 'det-' + Math.random().toString(36).slice(2, 9);
-  detalhe.id = idDet;
-  cab.setAttribute('aria-controls', idDet);
+  detalhe.id = idDom('det');
+  cab.setAttribute('aria-controls', detalhe.id);
   const info = el('div');
-  const acao = el('div', 'acao');
-  detalhe.append(info, acao);
 
+  Object.assign(c, { li, art, cab, projeto, custo, tarefa, selo, modelo, atividade, meta, hoje, detalhe, info });
+  detalhe.append(criarOrquestracao(c), info);
   art.append(cab, detalhe);
-
-  Object.assign(c, { li, art, cab, projeto, custo, tarefa, selo, modelo, atividade, meta, hoje, detalhe, info, acao });
 
   cab.addEventListener('click', () => {
     c.expandido = !c.expandido;
@@ -240,6 +567,546 @@ function criarCartao(s) {
   });
   return c;
 }
+
+// Bloco novo do detalhe: permissões, última resposta, mensagem, andamento e ações. Criado uma vez por cartão
+// e atualizado no lugar, para o rascunho e o foco sobreviverem às consultas.
+function criarOrquestracao(c) {
+  const raiz = el('div', 'orq');
+  c.avisoEstado = el('p', 'meta aviso-estado');
+  c.avisoEstado.hidden = true;
+  c.permissoesBox = el('div', 'permissoes');
+  c.blocos = new Map();
+  c.resp = criarResposta();
+  c.msg = criarMensagem(c);
+  c.and = criarAndamento();
+  c.acoes = criarAcoes(c);
+  raiz.append(c.avisoEstado, c.permissoesBox, c.resp.raiz, c.msg.raiz, c.and.raiz, c.acoes.raiz);
+  return raiz;
+}
+
+/* ----- Última resposta ----- */
+
+function criarResposta() {
+  const raiz = el('section', 'resposta-bloco');
+  const titulo = el('h3', 'titulo-linha');
+  titulo.id = idDom('resp');
+  titulo.tabIndex = -1;
+  const tempo = el('time', 'tempo');
+  titulo.append(el('span', null, 'Última resposta'), tempo);
+  raiz.setAttribute('aria-labelledby', titulo.id);
+  const texto = el('p', 'resposta recolhida');
+  texto.id = idDom('resp-texto');
+  const mais = botao('Mostrar tudo', 'btn btn-leve');
+  mais.setAttribute('aria-expanded', 'false');
+  mais.setAttribute('aria-controls', texto.id);
+  mais.hidden = true;
+  const notaOculto = el('p', 'meta', TEXTOS.notaOcultoResposta);
+  const notaCorte = el('p', 'meta', TEXTOS.notaCorte);
+  raiz.append(titulo, texto, mais, notaOculto, notaCorte);
+  const r = { raiz, titulo, tempo, texto, mais, notaOculto, notaCorte, aberta: false, atual: null };
+  mais.addEventListener('click', () => {
+    r.aberta = !r.aberta;
+    texto.classList.toggle('recolhida', !r.aberta);
+    mais.textContent = r.aberta ? 'Mostrar menos' : 'Mostrar tudo';
+    mais.setAttribute('aria-expanded', String(r.aberta));
+  });
+  return r;
+}
+
+function atualizarResposta(c) {
+  const s = c.sessao;
+  const r = c.resp;
+  // Coletor antigo não manda o campo: o bloco não aparece.
+  r.raiz.hidden = s.ultimaResposta === undefined;
+  if (r.raiz.hidden) return;
+  const texto = typeof s.ultimaResposta === 'string' ? s.ultimaResposta : '';
+  if (texto !== r.atual) {
+    r.atual = texto;
+    r.texto.textContent = texto || TEXTOS.semResposta;
+    r.texto.classList.toggle('vazia', !texto);
+    r.aberta = false;
+    r.texto.classList.add('recolhida');
+    r.mais.textContent = 'Mostrar tudo';
+    r.mais.setAttribute('aria-expanded', 'false');
+    r.notaOculto.hidden = !texto.includes('[oculto]');
+    r.notaCorte.hidden = texto.length < 1200;
+  }
+  const ms = s.ultimaRespostaEm;
+  r.tempo.hidden = !texto || !dataValida(ms);
+  if (!r.tempo.hidden) {
+    r.tempo.textContent = quando(ms);
+    r.tempo.dateTime = new Date(ms).toISOString();
+  }
+  // Só dá para medir com o detalhe visível; "Mostrar tudo" só aparece se o texto passa de 6 linhas.
+  if (c.expandido && texto && !r.aberta) r.mais.hidden = !(r.texto.scrollHeight > r.texto.clientHeight + 1);
+  else if (!texto) r.mais.hidden = true;
+}
+
+/* ----- Caixa de mensagem ----- */
+
+function criarMensagem(c) {
+  const raiz = el('div', 'mensagem');
+  const form = el('form', 'mensagem-form');
+  const idCampo = idDom('msg');
+  const rotulo = el('label', null, 'Mensagem para a sessão');
+  rotulo.htmlFor = idCampo;
+  const campo = el('textarea', 'campo campo-area');
+  campo.id = idCampo;
+  campo.rows = 3;
+  campo.maxLength = MAX_TEXTO;
+  const contador = el('p', 'meta num contador');
+  contador.setAttribute('aria-live', 'off');
+  contador.hidden = true;
+  const dica = el('p', 'meta so-ponteiro', 'Ctrl+Enter envia');
+  const enviar = el('button', 'btn btn-primario', 'Enviar mensagem');
+  enviar.type = 'submit';
+  const botoes = el('div', 'botoes');
+  botoes.append(enviar);
+  const motivo = el('p', 'acao-estado motivo');
+  motivo.id = idDom('msg-motivo');
+  const erro = el('p', 'acao-estado erro');
+  erro.setAttribute('role', 'alert');
+  form.append(rotulo, campo, contador, dica, botoes, motivo, erro);
+  const explicacao = el('p', 'meta');
+  const explicacao2 = el('p', 'meta');
+  raiz.append(form, explicacao, explicacao2);
+
+  const m = { raiz, form, campo, contador, enviar, motivo, erro, explicacao, explicacao2, enviando: false, erroTexto: null };
+  campo.addEventListener('input', () => {
+    m.erroTexto = null;
+    atualizarMensagem(c);
+  });
+  campo.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+      ev.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    enviarMensagem(c);
+  });
+  return m;
+}
+
+function motivoMensagem(s) {
+  return motivoBloqueio()
+    || (verboEmAndamento(s.chave, 'mensagem') ? TEXTOS.msgAnterior : null)
+    || (s.estado === 'trabalhando' ? TEXTOS.msgTrabalhando : null)
+    || (s.estado === 'esperando_permissao' ? TEXTOS.msgPermissao : null);
+}
+
+function atualizarMensagem(c) {
+  const s = c.sessao;
+  const m = c.msg;
+  const enc = estaEncerrada(s);
+  const comandada = s.gerenciada === true;
+  m.form.hidden = enc || !comandada;
+
+  let explicacao = null;
+  let explicacao2 = null;
+  if (enc) {
+    explicacao = s.retomavel === true ? TEXTOS.encerradaRetomavel
+      : s.retomavel === false ? TEXTOS.encerradaNaoRetomavel : TEXTOS.encerrada;
+  } else if (!comandada) {
+    explicacao = TEXTOS.naoComandada;
+    if (s.estado === 'esperando_permissao') explicacao2 = TEXTOS.naoComandadaPermissao;
+  }
+  m.explicacao.hidden = !explicacao;
+  m.explicacao.textContent = explicacao || '';
+  m.explicacao2.hidden = !explicacao2;
+  m.explicacao2.textContent = explicacao2 || '';
+  if (m.form.hidden) return;
+
+  const motivo = motivoMensagem(s);
+  const valor = m.campo.value;
+  m.enviar.disabled = m.enviando || !!motivo || !valor.trim();
+  m.enviar.textContent = m.enviando ? 'Enviando…' : 'Enviar mensagem';
+  m.campo.readOnly = m.enviando;
+  if (m.motivo.textContent !== (motivo || '')) m.motivo.textContent = motivo || '';
+  if (motivo) m.enviar.setAttribute('aria-describedby', m.motivo.id);
+  else m.enviar.removeAttribute('aria-describedby');
+  if (m.erro.textContent !== (m.erroTexto || '')) m.erro.textContent = m.erroTexto || '';
+  m.contador.hidden = valor.length < CONTADOR_DESDE;
+  if (!m.contador.hidden) m.contador.textContent = fmtInt.format(valor.length) + ' de ' + fmtInt.format(MAX_TEXTO);
+}
+
+async function enviarMensagem(c) {
+  const m = c.msg;
+  const texto = m.campo.value;
+  if (m.enviando || !texto.trim() || motivoMensagem(c.sessao)) return;
+  if (texto.length > MAX_TEXTO) {
+    m.erroTexto = TEXTOS.msgLonga;
+    atualizarMensagem(c);
+    return;
+  }
+  m.enviando = true;
+  m.erroTexto = null;
+  atualizarMensagem(c);
+  const r = await enviarComando('mensagem', c.sessao, { texto });
+  m.enviando = false;
+  if (r.ok) {
+    estado.textosEnviados.set(r.id, texto);
+    m.campo.value = ''; // o rascunho só some quando o servidor aceitou
+  } else {
+    m.erroTexto = r.erro;
+  }
+  atualizarCartao(c);
+  if (r.ok) m.campo.focus();
+}
+
+// Mensagem recusada, que falhou ou expirou volta para a caixa, se ela estiver vazia. Devolve a nota a mostrar.
+function devolverMensagens(c) {
+  let nota = null;
+  for (const cmd of comandosDe(c.chave)) {
+    if (cmd.tipo !== 'mensagem' || !estado.textosEnviados.has(cmd.id)) continue;
+    if (cmd.estado === 'feito') {
+      estado.textosEnviados.delete(cmd.id);
+    } else if (['recusado', 'falhou', 'expirado'].includes(cmd.estado)) {
+      const texto = estado.textosEnviados.get(cmd.id);
+      estado.textosEnviados.delete(cmd.id);
+      if (!c.msg.form.hidden && !c.msg.campo.value) {
+        c.msg.campo.value = texto;
+        c.msg.devolvida = cmd.id;
+      }
+    }
+  }
+  const ultimo = comandoDe(c.chave);
+  if (ultimo && c.msg.devolvida === ultimo.id) nota = TEXTOS.msgDevolvida;
+  return nota;
+}
+
+/* ----- Pedidos de permissão ----- */
+
+function criarBlocoPermissao(c, p) {
+  const ferramenta = String(p.ferramenta ?? '');
+  const entrada = String(p.entrada ?? '');
+  const completo = p.completo === true;
+  const raiz = el('section', 'permissao');
+  raiz.setAttribute('role', 'group');
+  const titulo = el('h3', 'permissao-titulo');
+  titulo.id = idDom('perm');
+  raiz.setAttribute('aria-labelledby', titulo.id);
+
+  const quer = el('p');
+  quer.append('A sessão quer usar a ferramenta ', el('strong', null, ferramenta), '.');
+  raiz.append(titulo, quer);
+  if (p.sensivel === true) {
+    const aviso = el('p', 'permissao-aviso');
+    aviso.append(el('strong', null, 'Atenção.'), TEXTOS.permSensivel);
+    raiz.append(aviso);
+  }
+  raiz.append(el('p', 'permissao-rotulo', 'O que ela quer fazer'));
+  // Exatamente o texto que será assinado (vistoHash): sem corte, sem reticências, quebras preservadas.
+  const pre = el('pre', 'entrada');
+  pre.tabIndex = 0;
+  pre.setAttribute('role', 'group');
+  pre.setAttribute('aria-label', 'Entrada do pedido');
+  pre.textContent = entrada;
+  raiz.append(pre);
+  if (entrada.includes('[oculto]')) raiz.append(el('p', 'meta', TEXTOS.permOculto));
+  if (!completo) raiz.append(el('p', 'permissao-aviso', TEXTOS.permIncompleto));
+
+  const faixa = el('p', 'permissao-aviso');
+  faixa.hidden = true;
+  const botoes = el('div', 'botoes botoes-permissao');
+  const negar = botao('Negar', 'btn');
+  botoes.append(negar);
+  // Pedido que não veio inteiro não oferece Aprovar: nem desabilitado, para não induzir a insistir.
+  const aprovar = completo ? botao('Aprovar', 'btn btn-primario') : null;
+  if (aprovar) botoes.append(aprovar);
+  const respondido = el('p', 'acao-estado', TEXTOS.permRespondido);
+  respondido.tabIndex = -1;
+  respondido.hidden = true;
+  const erro = el('p', 'acao-estado erro');
+  erro.setAttribute('role', 'alert');
+  const codigo = botao('Digitar o código de novo', 'btn btn-leve');
+  codigo.hidden = true;
+  codigo.addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
+  raiz.append(faixa, botoes, respondido, erro, codigo);
+
+  const b = {
+    raiz, titulo, pre, faixa, botoes, negar, aprovar, respondido, erro, codigo,
+    pedido: p.pedido, ferramenta, completo, enviando: null, idCmd: null, erroTexto: null,
+    assinatura: JSON.stringify([ferramenta, entrada, completo, p.sensivel === true]),
+  };
+  negar.addEventListener('click', () => responderPermissao(c, b, 'negar'));
+  if (aprovar) aprovar.addEventListener('click', () => responderPermissao(c, b, 'aprovar'));
+  return b;
+}
+
+function atualizarPermissoes(c) {
+  const s = c.sessao;
+  const pedidos = Array.isArray(s.permissoes) ? s.permissoes.filter((p) => p && p.pedido != null) : [];
+  const vistos = new Set();
+  let perdeuFoco = false;
+  pedidos.forEach((p, i) => {
+    const k = String(p.pedido);
+    vistos.add(k);
+    let b = c.blocos.get(k);
+    const assinatura = JSON.stringify([String(p.ferramenta ?? ''), String(p.entrada ?? ''), p.completo === true, p.sensivel === true]);
+    // O mesmo pedido com outra entrada: o bloco é recriado e o hash segue o que está na tela.
+    if (b && b.assinatura !== assinatura) {
+      perdeuFoco ||= b.raiz.contains(document.activeElement);
+      b.raiz.remove();
+      b = null;
+    }
+    if (!b) {
+      b = criarBlocoPermissao(c, p);
+      c.blocos.set(k, b);
+    }
+    b.titulo.textContent = 'Pedido de permissão' + (pedidos.length > 1 ? ' (' + (i + 1) + ' de ' + pedidos.length + ')' : '');
+    if (c.permissoesBox.children[i] !== b.raiz) c.permissoesBox.insertBefore(b.raiz, c.permissoesBox.children[i] || null);
+    atualizarBlocoPermissao(b);
+  });
+  for (const [k, b] of c.blocos) {
+    if (vistos.has(k)) continue;
+    perdeuFoco ||= b.raiz.contains(document.activeElement);
+    b.raiz.remove();
+    c.blocos.delete(k);
+  }
+  return perdeuFoco;
+}
+
+function atualizarBlocoPermissao(b) {
+  const bloqueio = motivoBloqueio();
+  const cmd = b.idCmd ? todosComandos().find((x) => x.id === b.idCmd) : null;
+  let respondido = false;
+  let erro = b.erroTexto;
+  let pedirCodigo = false;
+  if (cmd) {
+    const d = descreverComando(cmd);
+    if (d && d.falha) {
+      erro = d.texto;
+      pedirCodigo = !!d.pedirCodigo;
+    } else {
+      respondido = true;
+    }
+  }
+  b.faixa.hidden = !bloqueio;
+  if (bloqueio) b.faixa.textContent = coletorParado() ? TEXTOS.permForaDoAr : bloqueio;
+  b.botoes.hidden = respondido;
+  b.respondido.hidden = !respondido;
+  b.negar.disabled = !!bloqueio || !!b.enviando;
+  b.negar.textContent = b.enviando === 'negar' ? 'Negando…' : 'Negar';
+  if (b.aprovar) {
+    b.aprovar.disabled = !!bloqueio || !!b.enviando;
+    b.aprovar.textContent = b.enviando === 'aprovar' ? 'Aprovando…' : 'Aprovar';
+  }
+  if (b.erro.textContent !== (erro || '')) b.erro.textContent = erro || '';
+  b.codigo.hidden = !pedirCodigo;
+}
+
+async function responderPermissao(c, b, decisao) {
+  if (b.enviando) return;
+  if (decisao === 'aprovar' && !b.completo) return;
+  const clicado = decisao === 'aprovar' ? b.aprovar : b.negar;
+  b.enviando = decisao;
+  b.erroTexto = null;
+  b.idCmd = null;
+  atualizarBlocoPermissao(b);
+  // A impressão digital sai do que está na tela agora: a ferramenta exibida e o texto do <pre>.
+  const exibido = decisao === 'aprovar' ? { ferramenta: b.ferramenta, entrada: b.pre.textContent } : null;
+  const r = await enviarComando('permissao', c.sessao, { pedido: b.pedido, decisao }, { exibido });
+  b.enviando = null;
+  if (r.ok) b.idCmd = r.id;
+  else b.erroTexto = r.erro;
+  atualizarCartao(c);
+  if (!b.raiz.isConnected) return;
+  // Os botões somem ou voltam: o foco não pode ficar perdido no corpo da página.
+  if (r.ok) b.respondido.focus();
+  else clicado.focus();
+}
+
+/* ----- Ações ----- */
+
+function criarAcoes(c) {
+  const raiz = el('div', 'acao');
+  const botoes = el('div', 'botoes');
+  const interromper = botao('Interromper');
+  const encerrar = botao('Encerrar', 'btn btn-perigo');
+  const retomar = botao('Retomar');
+  botoes.append(interromper, encerrar, retomar);
+  const motivo = el('p', 'acao-estado motivo');
+  motivo.id = idDom('acoes-motivo');
+  const confirmacao = el('div');
+  raiz.append(botoes, motivo, confirmacao);
+  interromper.addEventListener('click', () => abrirConfirmacao(c, 'interromper'));
+  encerrar.addEventListener('click', () => abrirConfirmacao(c, 'encerrar'));
+  retomar.addEventListener('click', () => abrirConfirmacao(c, 'retomar'));
+  return { raiz, botoes, motivo, confirmacao, porVerbo: { interromper, encerrar, retomar } };
+}
+
+// Matriz da spec (item 5): o que aparece para cada estado e tipo de sessão.
+function acoesVisiveis(s) {
+  const enc = estaEncerrada(s);
+  const comandada = s.gerenciada === true;
+  return {
+    interromper: comandada && !enc && (s.estado === 'trabalhando' || s.estado === 'esperando_permissao'),
+    encerrar: !enc,
+    retomar: enc && s.retomavel === true && !verboEmAndamento(s.chave, 'retomar'),
+  };
+}
+
+function atualizarAcoes(c) {
+  const s = c.sessao;
+  const a = c.acoes;
+  const vis = acoesVisiveis(s);
+  if (c.confirmando && !vis[c.confirmando.tipo] && !c.confirmando.enviando) fecharConfirmacao(c, false);
+
+  const bloqueio = motivoBloqueio();
+  const aguardando = [];
+  for (const [tipo, b] of Object.entries(a.porVerbo)) {
+    b.hidden = !vis[tipo];
+    const ocupado = (tipo === 'interromper' || tipo === 'encerrar') && verboEmAndamento(s.chave, tipo);
+    if (vis[tipo] && ocupado) aguardando.push(tipo);
+    b.disabled = !!bloqueio || ocupado;
+  }
+  const algum = Object.values(vis).some(Boolean);
+  a.botoes.hidden = !algum || !!c.confirmando;
+  const motivo = algum ? bloqueio || aguardando.map(TEXTOS.aguardeVerbo).join(' ') : '';
+  if (a.motivo.textContent !== motivo) a.motivo.textContent = motivo;
+  for (const b of Object.values(a.porVerbo)) {
+    if (motivo) b.setAttribute('aria-describedby', a.motivo.id);
+    else b.removeAttribute('aria-describedby');
+  }
+  a.raiz.hidden = !algum && !c.confirmando;
+}
+
+function selectCom(id, rotulo, opcoes, padrao) {
+  const caixa = el('div', 'campo-grupo');
+  const l = el('label', null, rotulo);
+  l.htmlFor = id;
+  const sel = el('select', 'campo');
+  sel.id = id;
+  for (const [valor, texto] of opcoes) sel.add(new Option(texto, valor));
+  sel.value = padrao;
+  caixa.append(l, sel);
+  return { caixa, sel };
+}
+
+function abrirConfirmacao(c, tipo) {
+  if (c.confirmando) return;
+  const s = c.sessao;
+  const o = orquestracao() || {};
+  const raiz = el(tipo === 'interromper' ? 'div' : 'form', 'confirmar');
+  const erro = el('p', 'acao-estado erro');
+  erro.setAttribute('role', 'alert');
+  const botoes = el('div', 'botoes');
+  const cancelar = botao('Cancelar');
+  let ok;
+  let foco;
+  let dadosDe;
+
+  if (tipo === 'interromper') {
+    raiz.append(el('p', null, TEXTOS.confInterromper));
+    ok = botao('Interromper', 'btn btn-perigo');
+    botoes.append(ok, cancelar);
+    foco = cancelar;
+    dadosDe = () => ({});
+    ok.addEventListener('click', () => enviar());
+  } else if (tipo === 'encerrar') {
+    raiz.append(el('p', 'confirmar-titulo', TEXTOS.confEncerrarTitulo));
+    raiz.append(el('p', null, s.gerenciada === true ? TEXTOS.confEncerrarComandada : TEXTOS.confEncerrarManual));
+    const idCampo = idDom('nome');
+    const rotulo = el('label', null, 'Nome do trabalho');
+    rotulo.htmlFor = idCampo;
+    const campo = el('input', 'campo');
+    campo.id = idCampo;
+    campo.type = 'text';
+    campo.maxLength = 140;
+    campo.value = nomePadrao(s);
+    raiz.append(rotulo, campo);
+    ok = el('button', 'btn btn-primario', 'Encerrar e salvar log');
+    ok.type = 'submit';
+    botoes.append(ok, cancelar);
+    foco = campo;
+    dadosDe = () => {
+      const nome = campo.value.trim();
+      if (!nome) { campo.focus(); return null; }
+      return { nome };
+    };
+  } else {
+    raiz.append(el('p', 'confirmar-titulo', TEXTOS.confRetomar));
+    const modos = lista(o.modos).filter((m) => MODOS[m]);
+    const modo = selectCom(idDom('ret-modo'), 'Modo de permissão',
+      (modos.length ? modos : Object.keys(MODOS)).map((m) => [m, MODOS[m].rotulo + (m === 'manual' ? ' (manual)' : '')]), 'manual');
+    const modelo = selectCom(idDom('ret-modelo'), 'Modelo',
+      [['', 'Manter o da sessão'], ...lista(o.modelos).map((m) => [m, rotuloDe(MODELOS, m)])], '');
+    const esforco = selectCom(idDom('ret-esforco'), 'Esforço',
+      [['', 'Manter o da sessão'], ...(lista(o.esforcos).length ? lista(o.esforcos) : Object.keys(ESFORCOS)).map((e) => [e, rotuloDe(ESFORCOS, e)])], '');
+    raiz.append(modo.caixa, modelo.caixa, esforco.caixa);
+    ok = el('button', 'btn btn-primario', 'Retomar sessão');
+    ok.type = 'submit';
+    botoes.append(ok, cancelar);
+    foco = modo.sel;
+    dadosDe = () => {
+      const d = { modoPermissao: modo.sel.value || 'manual' };
+      if (modelo.sel.value) d.modelo = modelo.sel.value;
+      if (esforco.sel.value) d.esforco = esforco.sel.value;
+      return d;
+    };
+  }
+  raiz.append(botoes, erro);
+  const rotuloOk = ok.textContent;
+
+  async function enviar() {
+    if (c.confirmando.enviando) return;
+    const dados = dadosDe();
+    if (!dados) return;
+    c.confirmando.enviando = true;
+    ok.disabled = true;
+    cancelar.disabled = true;
+    ok.textContent = 'Enviando…';
+    erro.textContent = '';
+    const r = await enviarComando(tipo, c.sessao, dados);
+    if (!c.confirmando || c.confirmando.raiz !== raiz) return;
+    c.confirmando.enviando = false;
+    if (r.ok) {
+      fecharConfirmacao(c);
+      atualizarCartao(c);
+      return;
+    }
+    ok.disabled = false;
+    cancelar.disabled = false;
+    ok.textContent = rotuloOk;
+    if (r.erro) erro.textContent = r.erro;
+    ok.focus();
+  }
+
+  if (raiz.tagName === 'FORM') {
+    raiz.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      enviar();
+    });
+  }
+  cancelar.addEventListener('click', () => fecharConfirmacao(c));
+  raiz.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && c.confirmando && !c.confirmando.enviando) {
+      ev.stopPropagation();
+      fecharConfirmacao(c);
+    }
+  });
+
+  c.confirmando = { tipo, raiz, enviando: false };
+  c.acoes.confirmacao.replaceChildren(raiz);
+  atualizarAcoes(c);
+  foco.focus();
+  if (foco.select) foco.select();
+}
+
+function fecharConfirmacao(c, devolverFoco = true) {
+  const tipo = c.confirmando && c.confirmando.tipo;
+  c.acoes.confirmacao.replaceChildren();
+  c.confirmando = null;
+  atualizarAcoes(c);
+  if (!devolverFoco) return;
+  const b = c.acoes.porVerbo[tipo];
+  if (b && !b.hidden && !b.disabled && !c.acoes.botoes.hidden) b.focus();
+  else c.cab.focus();
+}
+
+/* ----- Detalhe existente ----- */
 
 function linhaGrade(dl, k, v) {
   dl.append(el('dt', null, k), el('dd', null, v));
@@ -265,7 +1132,7 @@ function montarDetalhe(c) {
   secao(tempo, 'Tempo');
   const g1 = el('dl', 'grade');
   linhaGrade(g1, 'Início', dataHora(s.iniciadaEm));
-  const fim = s.status === 'encerrada' ? s.ultimaAtividade : Date.now();
+  const fim = estaEncerrada(s) ? s.ultimaAtividade : Date.now();
   linhaGrade(g1, 'Duração', dataValida(s.iniciadaEm) && dataValida(fim) ? duracao(fim - s.iniciadaEm) : '—');
   tempo.appendChild(g1);
   nodes.push(tempo);
@@ -317,111 +1184,6 @@ function montarDetalhe(c) {
   info.replaceChildren(...nodes);
 }
 
-function atualizarAcao(c) {
-  const s = c.sessao;
-  const cmd = comandoDe(s.chave);
-  const pendente = !!cmd && cmd.estado === 'pendente';
-
-  if (!c.btnEncerrar) {
-    const b = el('button', 'btn btn-perigo', 'Encerrar sessão');
-    b.type = 'button';
-    b.addEventListener('click', () => abrirConfirmacao(c));
-    c.btnEncerrar = b;
-    c.estadoCmd = el('p', 'acao-estado');
-    c.estadoCmd.setAttribute('role', 'status');
-    c.estadoCmd.hidden = true;
-    c.acao.append(b, c.estadoCmd);
-  }
-  c.btnEncerrar.hidden = s.status === 'encerrada' || pendente || !!c.confirmando;
-
-  let msg = null;
-  if (c.erroLocal) {
-    msg = { texto: c.erroLocal, erro: true };
-  } else if (cmd) {
-    msg = textoComando(cmd);
-  }
-  if (msg) {
-    c.estadoCmd.textContent = msg.texto;
-    c.estadoCmd.classList.toggle('erro', msg.erro);
-    c.estadoCmd.hidden = false;
-  } else {
-    c.estadoCmd.hidden = true;
-  }
-}
-
-function abrirConfirmacao(c) {
-  if (c.confirmando) return;
-  c.erroLocal = null;
-  const form = el('form', 'confirmar');
-  const idCampo = 'nome-' + Math.random().toString(36).slice(2, 9);
-  const label = el('label', null, 'Nome do trabalho');
-  label.htmlFor = idCampo;
-  const campo = el('input', 'campo');
-  campo.id = idCampo;
-  campo.type = 'text';
-  campo.maxLength = 140;
-  campo.value = nomePadrao(c.sessao);
-  const botoes = el('div', 'botoes');
-  const ok = el('button', 'btn btn-primario', 'Encerrar');
-  ok.type = 'submit';
-  const cancelar = el('button', 'btn', 'Cancelar');
-  cancelar.type = 'button';
-  botoes.append(ok, cancelar);
-  form.append(label, campo, botoes);
-
-  const fechar = () => {
-    form.remove();
-    c.confirmando = null;
-    atualizarAcao(c);
-    c.btnEncerrar.focus();
-  };
-  cancelar.addEventListener('click', fechar);
-  form.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') fechar();
-  });
-  form.addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    const nome = campo.value.trim();
-    if (!nome) { campo.focus(); return; }
-    ok.disabled = true;
-    cancelar.disabled = true;
-    try {
-      const r = await api('/api/encerrar', jsonOpcoes('POST', { chave: c.chave, nome }));
-      if (r.ok && r.dados && r.dados.id) {
-        estado.pendentesLocais.set(c.chave, {
-          id: r.dados.id, chave: c.chave, nome, estado: 'pendente', erro: null, criadoEm: Date.now(),
-        });
-        form.remove();
-        c.confirmando = null;
-        atualizarAcao(c);
-        carregarEstado();
-        return;
-      }
-      ok.disabled = false;
-      cancelar.disabled = false;
-      const motivo = r.status === 404 ? 'a sessão não está mais no painel.'
-        : r.status === 409 ? 'a sessão já está encerrada ou tem um pedido pendente.'
-          : (r.dados && r.dados.erro) || 'erro ao enviar o pedido.';
-      c.erroLocal = 'Não encerrou: ' + motivo;
-      form.remove();
-      c.confirmando = null;
-      atualizarAcao(c);
-    } catch (e) {
-      if (e instanceof NaoAutorizado) return;
-      ok.disabled = false;
-      cancelar.disabled = false;
-      c.erroLocal = 'Não encerrou: sem conexão.';
-      atualizarAcao(c);
-    }
-  });
-
-  c.confirmando = form;
-  c.acao.insertBefore(form, c.estadoCmd);
-  atualizarAcao(c);
-  campo.focus();
-  campo.select();
-}
-
 function atualizarCartao(c) {
   const s = c.sessao;
   c.projeto.textContent = s.projeto || '(sem projeto)';
@@ -432,10 +1194,10 @@ function atualizarCartao(c) {
 
   c.tarefa.textContent = s.tarefa || 'Sem tarefa registrada';
 
-  const st = STATUS[s.status] || { rotulo: s.status || '—' };
-  c.selo.className = 'selo selo-' + (STATUS[s.status] ? s.status : 'ociosa');
-  c.selo.textContent = st.rotulo;
-  c.art.dataset.status = STATUS[s.status] ? s.status : 'ociosa';
+  const selo = seloDe(s);
+  c.selo.className = 'selo selo-' + selo.classe;
+  c.selo.textContent = selo.rotulo;
+  c.art.dataset.status = selo.classe;
   c.modelo.textContent = modeloLegivel(s.modelo) + (s.esforco ? ' · ' + s.esforco : '');
 
   c.atividade.textContent = s.ultimaAtividade
@@ -450,8 +1212,23 @@ function atualizarCartao(c) {
 
   c.cab.setAttribute('aria-expanded', String(c.expandido));
   c.detalhe.hidden = !c.expandido;
+
+  const parado = coletorParado() && estado.dados && estado.dados.retrato;
+  c.avisoEstado.hidden = !parado;
+  if (parado) c.avisoEstado.textContent = TEXTOS.estadoAntigo(hora(estado.dados.recebidoEm));
+  const perdeuFoco = atualizarPermissoes(c);
+  atualizarResposta(c);
+  atualizarMensagem(c);
+  const nota = devolverMensagens(c);
+  atualizarMensagem(c);
+  atualizarAndamento(c.and, comandoDe(c.chave), nota);
+  atualizarAcoes(c);
+  if (perdeuFoco) {
+    // O pedido respondido sumiu com o foco dentro: vai para o título da última resposta ou para o cartão.
+    if (c.expandido && !c.resp.raiz.hidden) c.resp.titulo.focus();
+    else c.cab.focus();
+  }
   if (c.expandido) montarDetalhe(c);
-  atualizarAcao(c);
 }
 
 function renderLista() {
@@ -463,9 +1240,9 @@ function renderLista() {
   // Uma sessão encerrada pelo painel fica 5 min em "Abertas" para mostrar o resultado do pedido.
   const recemEncerrada = (s) => {
     const c = comandoDe(s.chave);
-    return !!c && Date.now() - c.criadoEm < 5 * 60_000;
+    return !!c && Date.now() - c.criadoEm < VISIVEL_MS;
   };
-  const visiveis = estado.filtro === 'abertas' ? todas.filter((s) => s.status !== 'encerrada' || recemEncerrada(s)) : todas;
+  const visiveis = estado.filtro === 'abertas' ? todas.filter((s) => !estaEncerrada(s) || recemEncerrada(s)) : todas;
   const ativo = document.activeElement;
 
   const vivos = new Set(visiveis.map((s) => s.chave));
@@ -476,7 +1253,7 @@ function renderLista() {
     }
   }
 
-  const lista = $('lista');
+  const ul = $('lista');
   visiveis.forEach((s, i) => {
     let c = estado.cartoes.get(s.chave);
     if (!c) {
@@ -486,7 +1263,7 @@ function renderLista() {
     c.sessao = s;
     atualizarCartao(c);
     c.art.classList.toggle('destaque', i === 0);
-    if (lista.children[i] !== c.li) lista.insertBefore(c.li, lista.children[i] || null);
+    if (ul.children[i] !== c.li) ul.insertBefore(c.li, ul.children[i] || null);
   });
 
   if (ativo && ativo !== document.body && document.contains(ativo) && document.activeElement !== ativo) {
@@ -498,19 +1275,448 @@ function renderLista() {
   vazio.textContent = estado.filtro === 'abertas' ? 'Nenhuma sessão aberta agora' : 'Nenhuma sessão hoje';
 }
 
-function renderTudo() {
-  renderResumo();
-  renderLista();
+/* ---------- Anúncios para leitor de tela ---------- */
+
+let estadosAntes = null; // chave -> estado na consulta anterior (null antes da primeira carga)
+
+function anunciarMudancas() {
+  const sessoes = (estado.dados && estado.dados.retrato && estado.dados.retrato.sessoes) || [];
+  const agora = new Map(sessoes.map((s) => [s.chave, s.estado]));
+  if (estadosAntes) {
+    const frases = [];
+    for (const s of sessoes) {
+      const antes = estadosAntes.get(s.chave);
+      if (antes === undefined || antes === s.estado || !s.estado) continue;
+      const nome = s.projeto || 'Sessão';
+      if (s.estado === 'esperando_permissao') {
+        const f = Array.isArray(s.permissoes) && s.permissoes[0] && s.permissoes[0].ferramenta;
+        frases.push(nome + ': pedindo permissão para usar ' + (f || 'uma ferramenta') + '.');
+      } else if (s.estado === 'esperando_mensagem') {
+        frases.push(nome + (antes === 'trabalhando' ? ': terminou o trabalho.' : ': esperando você.'));
+      } else if (s.estado === 'encerrada') {
+        frases.push(nome + ': encerrada.');
+      }
+    }
+    if (frases.length) $('anuncios').textContent = frases.join(' ');
+  }
+  estadosAntes = agora;
 }
 
-/* ---------- Carga ---------- */
+/* ---------- Nova sessão ---------- */
+
+const nova = { enviando: false, dados: null }; // dados = o que o resumo mostrou e vai ser enviado
+const andamentoAbrir = criarAndamento();
+$('abrir-andamento').append(andamentoAbrir.raiz);
+
+function motivoNovaSessao() {
+  const d = estado.dados;
+  if (!d || !d.retrato || coletorParado()) return { texto: motivoBloqueio() };
+  const o = orquestracao();
+  if (!o || o.ativa !== true) return { orquestracaoDesligada: true };
+  if (!lista(o.projetos).length) return { texto: TEXTOS.novaProjetosVazio };
+  if (Number.isFinite(o.maxSessoes) && Number.isFinite(o.abertas) && o.abertas >= o.maxSessoes) {
+    return { texto: TEXTOS.novaLimite(o.maxSessoes) };
+  }
+  if (!criptoDisponivel()) return { texto: TEXTOS.desligadoCripto };
+  return null;
+}
+
+function renderNovaSessao() {
+  const m = motivoNovaSessao();
+  const b = $('nova-sessao');
+  b.disabled = !!m || nova.enviando;
+  const p = $('nova-motivo');
+  if (m && m.orquestracaoDesligada) {
+    if (!p.dataset.desligada) {
+      p.dataset.desligada = '1';
+      p.replaceChildren('A orquestração está desligada neste computador. Rode ',
+        el('code', null, 'node scripts/configurar-comandos.js'), ' nele para ligar.');
+    }
+  } else {
+    delete p.dataset.desligada;
+    const texto = m ? m.texto : '';
+    if (p.textContent !== texto) p.textContent = texto;
+  }
+  atualizarAndamento(andamentoAbrir, comandoAbrir());
+}
+
+function preencherSelect(sel, opcoes) {
+  const atual = sel.value;
+  sel.replaceChildren(...opcoes.map(([valor, texto]) => new Option(texto, valor)));
+  if (opcoes.some(([valor]) => valor === atual)) sel.value = atual;
+}
+
+function prepararFormNova() {
+  const o = orquestracao() || {};
+  preencherSelect($('nova-projeto'), [['', 'Escolha um projeto'], ...lista(o.projetos).map((p) => [p, p])]);
+  const contas = lista(o.contas);
+  $('nova-conta-grupo').hidden = contas.length <= 1;
+  preencherSelect($('nova-conta'), contas.map((c) => [c, c]));
+  if (contas.includes('principal') && !$('nova-conta').dataset.mexida) $('nova-conta').value = 'principal';
+  const modelos = lista(o.modelos).length ? lista(o.modelos) : Object.keys(MODELOS);
+  preencherSelect($('nova-modelo'), [['', 'Padrão da conta'], ...modelos.map((m) => [m, rotuloDe(MODELOS, m)])]);
+  const esforcos = lista(o.esforcos).length ? lista(o.esforcos) : Object.keys(ESFORCOS);
+  preencherSelect($('nova-esforco'), [['', 'Padrão'], ...esforcos.map((e) => [e, rotuloDe(ESFORCOS, e)])]);
+  const modos = lista(o.modos);
+  for (const linha of document.querySelectorAll('#nova-form .opcao[data-modo]')) {
+    linha.hidden = modos.length > 0 && !modos.includes(linha.dataset.modo);
+  }
+}
+
+const CAMPOS_NOVA = {
+  projeto: { controle: 'nova-projeto', erro: 'nova-projeto-erro' },
+  pedido: { controle: 'nova-pedido', erro: 'nova-pedido-erro' },
+  nome: { controle: 'nova-nome', erro: 'nova-nome-erro' },
+};
+
+function validarCampoNova(nome) {
+  const { controle, erro } = CAMPOS_NOVA[nome];
+  const v = $(controle).value;
+  let msg = '';
+  if (nome === 'projeto' && !v) msg = TEXTOS.erroProjeto;
+  if (nome === 'pedido') msg = !v.trim() ? TEXTOS.erroPedido : v.length > MAX_TEXTO ? TEXTOS.erroPedidoLongo : '';
+  if (nome === 'nome' && v.trim() && !RE_NOME.test(v.trim())) msg = TEXTOS.erroNome;
+  $(erro).textContent = msg;
+  if (msg) $(controle).setAttribute('aria-invalid', 'true');
+  else $(controle).removeAttribute('aria-invalid');
+  return !msg;
+}
+
+for (const nome of Object.keys(CAMPOS_NOVA)) {
+  $(CAMPOS_NOVA[nome].controle).addEventListener('blur', () => {
+    if ($('dlg-nova').open && !$('nova-form').hidden) validarCampoNova(nome);
+  });
+}
+$('nova-conta').addEventListener('change', () => { $('nova-conta').dataset.mexida = '1'; });
+
+function limparFormNova() {
+  $('nova-form').reset();
+  delete $('nova-conta').dataset.mexida;
+  for (const { controle, erro } of Object.values(CAMPOS_NOVA)) {
+    $(erro).textContent = '';
+    $(controle).removeAttribute('aria-invalid');
+  }
+  $('nova-erros').textContent = '';
+  $('nova-envio-erro').textContent = '';
+  mostrarEtapaNova('form');
+}
+
+function mostrarEtapaNova(etapa) {
+  const resumo = etapa === 'resumo';
+  $('nova-form').hidden = resumo;
+  $('nova-resumo').hidden = !resumo;
+  $('nova-titulo').textContent = resumo ? 'Confirmar nova sessão' : 'Nova sessão';
+}
+
+function dadosNova() {
+  const d = { projeto: $('nova-projeto').value, pedido: $('nova-pedido').value };
+  if (!$('nova-conta-grupo').hidden && $('nova-conta').value) d.conta = $('nova-conta').value;
+  if ($('nova-modelo').value) d.modelo = $('nova-modelo').value;
+  if ($('nova-esforco').value) d.esforco = $('nova-esforco').value;
+  const modo = document.querySelector('#nova-form input[name="modo"]:checked');
+  d.modoPermissao = modo ? modo.value : 'manual';
+  if ($('nova-worktree').checked) d.worktree = true;
+  const nome = $('nova-nome').value.trim();
+  if (nome) d.nome = nome;
+  return d;
+}
+
+function mostrarResumoNova(d) {
+  const o = orquestracao() || {};
+  const dl = $('nova-resumo-lista');
+  const linhas = [];
+  const linha = (k, v) => linhas.push(el('dt', null, k), v instanceof Node ? v : el('dd', null, v));
+  linha('Projeto', d.projeto);
+  if (d.conta) linha('Conta', d.conta);
+  linha('Modelo', d.modelo ? rotuloDe(MODELOS, d.modelo) : 'Padrão da conta');
+  linha('Esforço', d.esforco ? rotuloDe(ESFORCOS, d.esforco) : 'Padrão');
+  const modo = MODOS[d.modoPermissao] || { rotulo: d.modoPermissao, ajuda: '' };
+  const ddModo = el('dd');
+  ddModo.append(el('span', 'grade-valor', modo.rotulo), el('span', 'meta grade-ajuda', modo.ajuda));
+  linha('Modo de permissão', ddModo);
+  linha('Cópia isolada', d.worktree ? 'Sim' : 'Não');
+  linha('Nome', d.nome || 'automático');
+  const ddPedido = el('dd', 'grade-longo', d.pedido);
+  ddPedido.tabIndex = 0;
+  linha('Pedido inicial', ddPedido);
+  dl.replaceChildren(...linhas);
+  const abertas = Number.isFinite(o.abertas) ? o.abertas : 0;
+  const max = Number.isFinite(o.maxSessoes) ? o.maxSessoes : '—';
+  $('nova-resumo-frase').textContent = TEXTOS.novaFrase(abertas, max);
+  $('nova-envio-erro').textContent = '';
+  mostrarEtapaNova('resumo');
+  $('nova-titulo').focus();
+}
+
+$('nova-sessao').addEventListener('click', () => {
+  if (motivoNovaSessao()) return;
+  limparFormNova();
+  prepararFormNova();
+  $('dlg-nova').showModal();
+  $('nova-projeto').focus();
+});
+
+$('nova-form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const invalidos = Object.keys(CAMPOS_NOVA).filter((nome) => !validarCampoNova(nome));
+  if (invalidos.length) {
+    $('nova-erros').textContent = TEXTOS.novaErros(invalidos.length);
+    $(CAMPOS_NOVA[invalidos[0]].controle).focus();
+    return;
+  }
+  $('nova-erros').textContent = '';
+  nova.dados = dadosNova();
+  mostrarResumoNova(nova.dados);
+});
+
+$('nova-voltar').addEventListener('click', () => {
+  mostrarEtapaNova('form');
+  $('nova-projeto').focus();
+});
+
+$('nova-abrir').addEventListener('click', async () => {
+  if (nova.enviando || !nova.dados) return;
+  nova.enviando = true;
+  const abrir = $('nova-abrir');
+  abrir.disabled = true;
+  $('nova-voltar').disabled = true;
+  abrir.textContent = 'Enviando…';
+  $('nova-envio-erro').textContent = '';
+  const r = await enviarComando('abrir', null, nova.dados);
+  nova.enviando = false;
+  abrir.disabled = false;
+  $('nova-voltar').disabled = false;
+  abrir.textContent = 'Abrir sessão';
+  if (r.ok) {
+    $('dlg-nova').close();
+    renderNovaSessao();
+    $('nova-sessao').focus();
+    return;
+  }
+  if (r.erro) $('nova-envio-erro').textContent = r.erro;
+});
+
+$('nova-fechar').addEventListener('click', () => {
+  if (!nova.enviando) $('dlg-nova').close();
+});
+$('dlg-nova').addEventListener('cancel', (ev) => {
+  if (nova.enviando) ev.preventDefault();
+});
+$('dlg-nova').addEventListener('close', () => {
+  limparFormNova();
+  nova.dados = null;
+  if (!$('nova-sessao').disabled) $('nova-sessao').focus();
+});
+
+/* ---------- Código do aparelho ---------- */
+
+let pedidoCodigo = null; // { promessa, resolver, deComando, origem }
+let derivando = false;
+
+function abrirDialogoCodigo({ troca = false, deComando = false } = {}) {
+  if (pedidoCodigo) return pedidoCodigo.promessa;
+  let resolver;
+  const promessa = new Promise((r) => { resolver = r; });
+  pedidoCodigo = { promessa, resolver, deComando, origem: document.activeElement };
+  $('codigo-texto').textContent = troca ? TEXTOS.codigoTroca : TEXTOS.codigoPrimeira;
+  limparCampoCodigo();
+  $('dlg-codigo').showModal();
+  $('codigo').focus();
+  return promessa;
+}
+
+function limparCampoCodigo() {
+  const campo = $('codigo');
+  campo.value = '';
+  campo.type = 'password';
+  campo.removeAttribute('aria-invalid');
+  $('codigo-mostrar').setAttribute('aria-pressed', 'false');
+  $('codigo-erro').textContent = '';
+}
+
+function fecharDialogoCodigo(resultado) {
+  const p = pedidoCodigo;
+  pedidoCodigo = null;
+  limparCampoCodigo();
+  if ($('dlg-codigo').open) $('dlg-codigo').close();
+  if (!p) return;
+  p.resolver(resultado);
+  if (p.origem && p.origem.isConnected && p.origem !== document.body) p.origem.focus();
+}
+
+async function guardarCodigo() {
+  if (derivando || !pedidoCodigo) return;
+  const campo = $('codigo');
+  const erro = $('codigo-erro');
+  const normal = normalizarCodigo(campo.value);
+  if (!normal || !RE_CODIGO.test(normal)) {
+    erro.textContent = TEXTOS.codigoMalFormado;
+    campo.setAttribute('aria-invalid', 'true');
+    campo.focus();
+    return;
+  }
+  if (!criptoDisponivel()) {
+    erro.textContent = TEXTOS.semCripto;
+    return;
+  }
+  derivando = true;
+  const guardarBtn = $('codigo-guardar');
+  guardarBtn.disabled = true;
+  $('codigo-cancelar').disabled = true;
+  guardarBtn.textContent = 'Conferindo…';
+  $('dlg-codigo').setAttribute('aria-busy', 'true');
+  erro.textContent = '';
+  try {
+    const aparelho = await derivarChave(normal);
+    campo.value = ''; // o código não fica nem no campo
+    try {
+      await guardar(aparelho);
+    } catch {
+      erro.textContent = TEXTOS.semIndexedDB;
+      return;
+    }
+    estado.kid = aparelho.kid;
+    const deComando = pedidoCodigo.deComando;
+    fecharDialogoCodigo(aparelho);
+    atualizarRodape(deComando ? null : TEXTOS.codigoGuardado);
+  } catch {
+    erro.textContent = TEXTOS.codigoMalFormado;
+  } finally {
+    derivando = false;
+    guardarBtn.disabled = false;
+    $('codigo-cancelar').disabled = false;
+    guardarBtn.textContent = 'Guardar neste aparelho';
+    $('dlg-codigo').removeAttribute('aria-busy');
+  }
+}
+
+$('codigo-guardar').addEventListener('click', guardarCodigo);
+$('codigo').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    guardarCodigo();
+  }
+});
+$('codigo').addEventListener('input', () => {
+  $('codigo').removeAttribute('aria-invalid');
+  $('codigo-erro').textContent = '';
+});
+$('codigo-mostrar').addEventListener('click', () => {
+  const campo = $('codigo');
+  const mostrar = campo.type === 'password';
+  campo.type = mostrar ? 'text' : 'password';
+  $('codigo-mostrar').setAttribute('aria-pressed', String(mostrar));
+});
+$('codigo-cancelar').addEventListener('click', () => {
+  if (!derivando) fecharDialogoCodigo(null);
+});
+$('dlg-codigo').addEventListener('cancel', (ev) => {
+  ev.preventDefault();
+  if (!derivando) fecharDialogoCodigo(null);
+});
+$('dlg-codigo').addEventListener('close', () => {
+  if (pedidoCodigo) fecharDialogoCodigo(null);
+});
+
+// Chave para assinar: a guardada neste navegador ou, se não houver, a que o dono digitar agora.
+async function chaveDoAparelho() {
+  try {
+    const a = await obter();
+    if (a) {
+      if (estado.kid !== a.kid) {
+        estado.kid = a.kid;
+        atualizarRodape();
+      }
+      return a;
+    }
+  } catch { /* sem IndexedDB: o diálogo avisa ao tentar guardar */ }
+  return abrirDialogoCodigo({ deComando: true });
+}
+
+/* ---------- Rodapé "Este aparelho" ---------- */
+
+function atualizarRodape(status) {
+  const texto = $('aparelho-texto');
+  const kid = estado.kid;
+  if (kid) {
+    const o = orquestracao();
+    const conhecido = o && Array.isArray(o.aparelhos) ? o.aparelhos.find((a) => a && a.kid === kid) : undefined;
+    const partes = ['Aparelho ', el('code', null, kid)];
+    if (conhecido && conhecido.rotulo) partes.push(' · ' + conhecido.rotulo);
+    else if (o && Array.isArray(o.aparelhos) && !conhecido) {
+      partes.push('. O computador não conhece este código; os comandos serão recusados. Digite o código de novo ou esqueça este aparelho.');
+    }
+    texto.replaceChildren(...partes);
+  } else {
+    texto.textContent = 'Este aparelho ainda não tem código.';
+  }
+  $('aparelho-sair').hidden = !kid;
+  $('aparelho-informar').hidden = !!kid;
+  $('aparelho-trocar').hidden = !kid;
+  $('aparelho-esquecer').hidden = !kid;
+  if (status !== undefined) $('aparelho-status').textContent = status || '';
+}
+
+$('aparelho-informar').addEventListener('click', () => abrirDialogoCodigo());
+$('aparelho-trocar').addEventListener('click', () => abrirDialogoCodigo({ troca: true }));
+$('aparelho-esquecer').addEventListener('click', () => {
+  $('aparelho-botoes').hidden = true;
+  $('aparelho-confirmar').hidden = false;
+  $('aparelho-esquecer-nao').focus();
+});
+function fecharConfirmacaoAparelho() {
+  $('aparelho-confirmar').hidden = true;
+  $('aparelho-botoes').hidden = false;
+}
+$('aparelho-esquecer-nao').addEventListener('click', () => {
+  fecharConfirmacaoAparelho();
+  $('aparelho-esquecer').focus();
+});
+$('aparelho-confirmar').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') {
+    fecharConfirmacaoAparelho();
+    $('aparelho-esquecer').focus();
+  }
+});
+$('aparelho-esquecer-sim').addEventListener('click', async () => {
+  try { await esquecer(); } catch { /* sem IndexedDB não há o que esquecer */ }
+  estado.kid = null;
+  fecharConfirmacaoAparelho();
+  atualizarRodape(TEXTOS.aparelhoEsquecido);
+  $('aparelho-informar').focus();
+});
+
+/* ---------- Desenho e carga ---------- */
+
+function renderTudo() {
+  renderResumo();
+  renderNovaSessao();
+  renderLista();
+  atualizarRodape();
+  anunciarMudancas();
+}
 
 let carregando = false;
-let timerRetry = null;
+let deNovo = false;
+let timerConsulta = null;
 
+function agendarConsulta(ms) {
+  clearTimeout(timerConsulta);
+  timerConsulta = setTimeout(() => {
+    if (document.visibilityState === 'visible' && estado.aba === 'sessoes') carregarEstado();
+    else agendarConsulta(ms);
+  }, ms);
+}
+
+// Consulta o estado; a próxima vem em 2 s enquanto houver comando a caminho e em 15 s no resto do tempo.
 async function carregarEstado() {
-  if (carregando) return;
+  if (carregando) {
+    deNovo = true;
+    return;
+  }
   carregando = true;
+  clearTimeout(timerConsulta);
+  let proxima = INTERVALO_MS;
   try {
     const r = await api('/api/estado');
     if (!r.ok || !r.dados) throw new Error('resposta inválida');
@@ -522,22 +1728,22 @@ async function carregarEstado() {
     } catch (erroTela) {
       console.error('[painel] erro ao desenhar', erroTela);
     }
+    if (haComandoEmAndamento()) proxima = INTERVALO_RAPIDO_MS;
   } catch (e) {
     if (e instanceof NaoAutorizado) return;
     $('banner-rede').hidden = false;
     renderResumo();
-    clearTimeout(timerRetry);
-    timerRetry = setTimeout(() => {
-      if (document.visibilityState === 'visible') carregarEstado();
-    }, 5000);
+    proxima = RETRY_MS;
   } finally {
     carregando = false;
   }
+  if (deNovo) {
+    deNovo = false;
+    carregarEstado();
+    return;
+  }
+  agendarConsulta(proxima);
 }
-
-setInterval(() => {
-  if (document.visibilityState === 'visible' && estado.aba === 'sessoes') carregarEstado();
-}, INTERVALO_MS);
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && estado.aba === 'sessoes') carregarEstado();
@@ -692,11 +1898,19 @@ $('busca').addEventListener('input', () => {
 
 /* ---------- Sair ---------- */
 
+// Sair também esquece o aparelho: a chave de comandos não fica num navegador sem login.
 $('sair').addEventListener('click', async () => {
+  try { await esquecer(); } catch { /* sem IndexedDB não há o que esquecer */ }
   try {
     await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
   } catch { /* segue para o login mesmo assim */ }
   location.href = '/login.html';
 });
 
+/* ---------- Início ---------- */
+
+obter()
+  .then((a) => { estado.kid = a ? a.kid : null; })
+  .catch(() => { estado.kid = null; })
+  .finally(() => atualizarRodape());
 carregarEstado();
