@@ -99,23 +99,27 @@ export async function executarEncerrar(coletor, cmd, { kill = (pid, sig) => proc
   const fim = agora();
   const sessao = coletor.sessaoDe(cmd.chave) || antes;
   if (!sessao) return { ok: true, log: { nome: cmd.nome || cmd.chave, encerradaEm: fim } };
+  return { ok: true, log: logDeEncerramento(sessao, cmd.nome, fim) };
+}
+
+// O registro que vai para o Histórico. O texto de um pedido não vai para lá:
+// quando a tarefa veio do primeiro pedido, ela fica de fora (inclusive do nome padrão).
+export function logDeEncerramento(sessao, nome, fim) {
+  const tarefa = sessao.tarefaOrigem === 'pedido' ? null : sessao.tarefa;
   const inicio = sessao.iniciadaEm || null;
   return {
-    ok: true,
-    log: {
-      nome: cmd.nome || nomePadrao(sessao, fim),
-      projeto: sessao.projeto,
-      conta: sessao.conta,
-      tarefa: sessao.tarefa,
-      resumo: sessao.resumo,
-      iniciadaEm: inicio,
-      encerradaEm: fim,
-      duracaoMs: inicio ? fim - inicio : null,
-      modelo: sessao.modelo,
-      esforco: sessao.esforco,
-      porModelo: sessao.porModelo,
-      tokens: sessao.tokens,
-      custo: sessao.custo,
-    },
+    nome: nome || nomePadrao({ ...sessao, tarefa }, fim),
+    projeto: sessao.projeto,
+    conta: sessao.conta,
+    tarefa,
+    resumo: sessao.resumo,
+    iniciadaEm: inicio,
+    encerradaEm: fim,
+    duracaoMs: inicio ? fim - inicio : null,
+    modelo: sessao.modelo,
+    esforco: sessao.esforco,
+    porModelo: sessao.porModelo,
+    tokens: sessao.tokens,
+    custo: sessao.custo,
   };
 }

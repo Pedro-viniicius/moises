@@ -68,6 +68,20 @@ export function statusDe(reg, vivo, agora = Date.now()) {
   return agora - desde > OCIOSA_APOS_MS ? 'ociosa' : 'aguardando';
 }
 
+// Estado ao vivo da sessão, mais fino que `statusDe`: separa "esperando permissão" de "esperando mensagem".
+// Valores: trabalhando, esperando_permissao, esperando_mensagem, parada, encerrada.
+export function estadoDe(reg, vivo, agora = Date.now()) {
+  if (!vivo) return 'encerrada';
+  const s = String(reg.status || '').toLowerCase();
+  if (s === 'busy' || s === 'shell' || s === 'running') return 'trabalhando';
+  if (s === 'waiting') {
+    const esperando = String(reg.waitingFor || '').toLowerCase();
+    return /perm|sandbox|worker/.test(esperando) ? 'esperando_permissao' : 'esperando_mensagem';
+  }
+  const desde = reg.statusUpdatedAt || reg.updatedAt || 0;
+  return agora - desde > OCIOSA_APOS_MS ? 'parada' : 'esperando_mensagem';
+}
+
 export class Coletor {
   constructor({ dirs = diretoriosDeConfig(), agora = () => Date.now(), ignorarCwds = [] } = {}) {
     this.dirs = dirs;
@@ -176,6 +190,18 @@ export class Coletor {
     const cwd = reg.cwd || p?.cwd || null;
     const nome = lido?.tituloArquivo || p?.tituloManual || reg.name || null;
     const ultima = Math.max(p?.ultimaAtividade || 0, viv?.vivo ? reg.statusUpdatedAt || reg.updatedAt || 0 : 0) || null;
+    // MOISES_SUBIR_TEXTO=0: nenhum texto de conversa (resposta, pedido) sai da máquina.
+    const subirTexto = process.env.MOISES_SUBIR_TEXTO !== '0';
+    // Título da IA, resumo, primeiro pedido, nome: o primeiro que tiver texto depois da redação vence.
+    let tarefa = null;
+    let tarefaOrigem = null;
+    for (const [origem, texto] of [['titulo', p?.tituloIA], ['resumo', p?.resumo], ['pedido', subirTexto ? p?.primeiroPedido : null], ['nome', nome]]) {
+      tarefa = redigir(texto, 140);
+      if (tarefa) {
+        tarefaOrigem = origem;
+        break;
+      }
+    }
     return {
       lido,
       sessao: {
@@ -184,9 +210,15 @@ export class Coletor {
         conta: nomeConta(dir),
         projeto: cwd ? path.basename(cwd) : '?',
         nome: redigir(nome, 60),
-        tarefa: redigir(p?.tituloIA || p?.resumo, 140),
+        tarefa,
+        tarefaOrigem,
         resumo: redigir(p?.resumo, 280),
         status: statusDe(reg, !!viv?.vivo, agora),
+        estado: estadoDe(reg, !!viv?.vivo, agora),
+        ultimaResposta: subirTexto ? redigir(p?.ultimaResposta, 1200) : null,
+        ultimaRespostaEm: subirTexto ? horario(p?.ultimaRespostaEm, agora) : null,
+        gerenciada: false,
+        permissoes: [],
         tipo: reg.kind || null,
         iniciadaEm: horario(reg.startedAt, agora) || horario(p?.primeiraAtividade, agora),
         ultimaAtividade: horario(ultima, agora),
@@ -281,6 +313,26 @@ export class Coletor {
       for (const est of this.lerSessao(info).todos) for (const chaveResp of est.respostas.keys()) vistas.add(chaveResp);
     }
     return this.montar(k, this.registros().get(k), agora, diaLocal(agora), vistas).sessao;
+  }
+
+  // Pasta de trabalho da sessão: a do registro de um processo vivo ou, na falta dele, a do transcript.
+  // Só caminho absoluto serve. Devolve null se a sessão não existe ou não tem pasta conhecida.
+  cwdDe(chavePainel) {
+    const sep = String(chavePainel ?? '').indexOf(':');
+    if (sep < 1) return null;
+    const conta = chavePainel.slice(0, sep);
+    const id = chavePainel.slice(sep + 1);
+    const dir = this.dirs.find((d) => nomeConta(d) === conta);
+    if (!dir) return null;
+    const absoluto = (c) => (typeof c === 'string' && path.isAbsolute(c) ? c : null);
+    const reg = this.registroDe(dir, id);
+    if (reg && processoConfere(reg)) {
+      const c = absoluto(reg.cwd);
+      if (c) return c;
+    }
+    if (!this.indice.has(`${dir}|${id}`)) this.reindexar();
+    const info = this.indice.get(`${dir}|${id}`);
+    return info ? absoluto(this.lerSessao(info).principal.cwd) : null;
   }
 
   // Registro da sessão, preferindo o que tem processo vivo (pode haver órfãos com o mesmo sessionId).
