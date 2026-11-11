@@ -366,3 +366,67 @@ Sobe `scripts/dev.js` como processo filho e o coletor **no próprio processo** p
 
 - [ ] **Passo 1:** atualizar e conferir os comandos citados rodando cada um.
 - [ ] **Passo 2:** commit `Docs: orquestração, canal de comandos e o que sai da máquina`.
+
+---
+
+## Rodada de correção 1 (depois da revisão do código)
+
+Achados e decisões em `ACHADOS.md`, seção "Rodada 1". Quatro grupos com arquivos disjuntos, em paralelo (tarefas 11 a 14), e depois o pareamento por par de chaves (tarefa 15), sozinho. Todas sensíveis, exceto a 13.
+
+### Tarefa 11 (sensível): orquestrador e redação — S14/A2, S18, S19, S23, S26, R4, pedido sensível
+
+**Arquivos:** `collector/orquestrador.js`, `collector/redigir.js`, `test/orquestrador.test.js`, `test/coletor.test.js`, `test/fixtures/claude-falso.js`.
+
+- **Pedido inteiro de verdade (S14/A2).** Além de `alterado`, `completo` é falso quando o texto publicado tem mais de 30 linhas, 3 ou mais quebras de linha seguidas com só espaço ou tabulação entre elas, 16 ou mais espaços ou tabulações seguidos, ou espaço ou tabulação no fim de alguma linha. Função exportada de `redigir.js`: `escondeConteudo(texto) → boolean`.
+- **Sensível (S26).** `sensivel` passa a ser verdadeiro também quando o comando de um Bash tem qualquer caractere fora de ASCII imprimível (`/[^\x20-\x7E\n\t]/`).
+- **Pedido sensível não se aprova pelo painel.** `permissao` com `decisao: 'aprovar'` num pedido `sensivel` é recusado com "Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue." (negar continua valendo).
+- **Grupo de processos (S18).** `spawn` com `detached: true`; todo sinal de encerramento vai para o grupo (`process.kill(-pid, sinal)`), com queda para o pid se o grupo não existir. `fechar()` continua esperando todos. Teste com o falso criando um neto (novo modo `neto`: dispara `sleep 300` em segundo plano e responde) e conferindo que o neto morre ao encerrar.
+- **`init` obrigatório (S19).** Até o primeiro `init` conferido, todo `can_use_tool` é negado na hora ("Sessão sem configuração conferida.") e não é publicado; `result` sem nenhum `init` antes encerra a sessão com o erro do `init`. Novo modo do falso `sem-init`.
+- **Pasta do próprio coletor (S23).** `abrir` e `retomar` recusam pasta cujo caminho real contenha a pasta real do coletor (`path.dirname` de `collector/`, ou seja, a raiz do repositório onde o coletor roda), com "Esta pasta contém o próprio Moisés; abra-a só pelo terminal.". Opção do construtor `pastaColetor` (padrão: a raiz calculada a partir de `import.meta.url`), para os testes.
+- **Sessão sintética (R4).** `ultimaResposta: null`, `ultimaRespostaEm: null`, `tarefaOrigem: null`.
+
+### Tarefa 12 (sensível): porteiro e auditoria — R1, A5, S21, S24, R3
+
+**Arquivos:** `collector/comandos.js`, `collector/auditoria.js`, `test/canal-comandos.test.js`.
+
+- **R1.** A recusa `relogio` passa pelo teto por minuto antes (estourou → `ritmo`); id que já está em vistos não regrava o arquivo; id com `criadoEm` no futuro é guardado com o instante de chegada (não com `criadoEm`) para a poda por tempo funcionar. Testes: "o 31º comando com data no futuro é recusado por ritmo"; "id com data muito no futuro não faz o arquivo de vistos crescer sem limite".
+- **A5.** Até a assinatura conferir, a auditoria grava `quem: null` e o `kid` informado num campo separado `kidInformado` (só se casar com `/^[a-z0-9]{6}$/`, senão `null`).
+- **S21.** Recusas vão para `auditoria-recusas.jsonl`; `aceito`, `feito` e `falhou` ficam em `auditoria.jsonl`. Cada um gira sozinho (5 MB, guarda `.1`). O teto de linhas de recusa por minuto continua, e as suprimidas são contadas por motivo na linha de resumo.
+- **S24.** Em `falhou`, `resultado` é só a primeira frase do erro (até o primeiro `.`, `:` ou quebra de linha), cortada em 80.
+- **R3.** `concluir(cmd, { ok, erro, chaveNova })`: em `abrir` com `ok`, a linha `feito` grava `sessao` = `chaveNova`.
+
+### Tarefa 13: painel — D1, D2, pedido inteiro na tela
+
+**Arquivos:** `public/app.js`, `public/style.css`.
+
+- O bloco do pedido de permissão perde a altura máxima e a rolagem interna: o pedido aparece inteiro. Acima dele, "N linhas".
+- Pedido `sensivel` mostra só "Negar" e o texto "Este pedido mexe em configuração ou chaves; aprove só no computador, ou negue." (o coletor também recusa).
+- D1: o motivo "Comandos desligados" aparece uma vez por cartão (nas ações); os outros controles apontam para ele com `aria-describedby`.
+- D2: encerrar com nome vazio mostra "Escreva um nome para o trabalho.".
+- O texto do teto diário diz "aberturas e retomadas pelo painel hoje".
+
+### Tarefa 14 (sensível): laço e servidor — S15, S16, S17, S22, A4, R2, R5, pergunta do ritmo
+
+**Arquivos:** `collector/index.js`, `api/ingest.js`, `api/estado.js`, `api/comando.js`, `api/_lib.js`, `scripts/redis-memoria.js`, `test/laco.test.js`, `test/api.test.js`.
+
+- **S17.** `configuracao()` lê também `MOISES_COMANDOS`, `MOISES_SUBIR_TEXTO`, `MOISES_ENCERRAR` e `MOISES_ENCERRAR_POR_HORA` do `coletor.env` e os põe em `process.env` antes de construir os módulos (o ambiente do processo continua valendo por cima). Ao iniciar, o log diz "comandos: ligados/desligados; texto: sobe/não sobe".
+- **S16.** Depois de `orquestrador.aplicar`, em sessão que não é `gerenciada`: `ultimaResposta` e `ultimaRespostaEm` viram `null`, e a `tarefa` vinda do pedido (`tarefaOrigem === 'pedido'`) cai para o nome. `api/ingest.js` grava o retrato com validade de 24 h.
+- **S15 (integridade do painel).** A cada 10 min (e no início), o coletor baixa de `MOISES_URL` os arquivos `/index.html`, `/app.js`, `/assinatura.js`, `/cofre.js` e `/style.css` e compara o SHA-256 com os de `public/` da pasta onde ele roda (opção `pastaPublica`). Divergência ou falha de download → comandos desligados com motivo `painel_alterado` ("O painel publicado é diferente do código deste computador; comandos desligados.") até a próxima conferência bater. `MOISES_CONFERIR_PAINEL=0` desliga a conferência (o teste de ponta a ponta usa o mesmo `public/`, então bate). O `Porteiro` ganha `desligar(motivo)`/`religar()`; se a tarefa 12 não os tiver, o laço recusa antes do porteiro com o mesmo motivo e ack `recusado`.
+- **S22.** O corpo do ingest leva `protocolo: 2`; o servidor só entrega comandos a quem manda `protocolo: 2`.
+- **A4.** `POST /api/comando` recusa com 403 `kid` que não esteja em `retrato.orquestracao.aparelhos` (sem retrato: 503). `GET /api/estado` grava `painelVistoEm` no máximo a cada 30 s.
+- **Ritmo.** `proximoIntervalo` acelera com o painel visto há menos de 60 s, ack na fila ou sessão comandada em `trabalhando` ou `esperando_permissao` (não mais por qualquer sessão comandada aberta).
+- **R1 (parte do laço).** `tratarComandos` trata no máximo 20 comandos por resposta.
+- **R2.** `parar()`, depois de fechar o orquestrador e esperar as execuções, tenta um último envio só com os acks (tempo limite de 5 s).
+- **R3 (parte do laço).** Passa `chaveNova` a `porteiro.concluir`.
+- **R5.** O teste de piso do laço fica sem limite inferior apertado (só o teto).
+
+### Tarefa 15 (sensível): pareamento por par de chaves — A1
+
+Depois das tarefas 11 a 14. **Arquivos:** `public/assinatura.js`, `public/cofre.js`, `public/app.js`, `public/index.html`, `collector/assinatura.js`, `collector/comandos.js` (só o `Chaveiro` e a conferência), `collector/index.js` (só repassar pedidos de pareamento), `api/aparelho.js` (novo), `api/ingest.js` (só pedidos de pareamento), `scripts/configurar-comandos.js`, testes correspondentes e `test/e2e/orquestracao.e2e.js`.
+
+- **Chave do aparelho.** O navegador gera um par ECDSA P-256 com a chave privada **não extraível** (`generateKey(..., false, ['sign'])`) e exporta só a pública (`raw`, 65 bytes, base64url). `impressao` = os 16 primeiros hexadecimais do SHA-256 da pública, em 4 grupos de 4 (`a1b2-c3d4-e5f6-0718`); `kid` = os 6 primeiros hexadecimais. Nada é digitado na página.
+- **Assinatura.** ECDSA SHA-256 no formato IEEE P1363 (64 bytes) em base64url sem `=`: `/^[A-Za-z0-9_-]{86}$/`. O texto assinado não muda. O coletor confere com `crypto.verify('sha256', texto, { key, dsaEncoding: 'ieee-p1363' }, assinatura)` e recusa base64url não canônico.
+- **Pedido de pareamento.** `POST /api/aparelho` (cookie e JSON) com `{kid, publica, rotulo}` (`rotulo` de 1 a 40 caracteres, sem controle). O servidor guarda em `moises:aparelhos-pedidos` (no máximo 5; cada um vale 1 h) e o ingest os entrega ao coletor (`aparelhosPedidos`), que os grava em `<pastaEstado>/aparelhos-pedidos.json` (600) sem confiar neles.
+- **Autorizar no computador.** `node scripts/configurar-comandos.js --pedidos` lista `kid`, rótulo, impressão digital e horário; `--autorizar <kid>` grava `{rotulo, publica, criadaEm}` em `chaves-comandos.json` (600) e avisa se já existe aparelho com o mesmo rótulo; `--listar` e `--revogar <kid>` continuam. Não existe mais código nem `codigo-<kid>.txt`.
+- **Painel.** O diálogo do código vira "Autorizar este aparelho": rótulo, botão "Pedir autorização", a impressão digital em letras grandes e a instrução "No computador, rode `node scripts/configurar-comandos.js --pedidos`, confira se a impressão digital é esta e autorize com `--autorizar <kid>`.". O aparelho fica "aguardando autorização" até o `kid` aparecer em `orquestracao.aparelhos`. "Esquecer este aparelho" apaga a chave; um aparelho esquecido só volta com nova autorização no computador.
+- **Testes.** Os da assinatura passam a usar o par de chaves; o porteiro recusa assinatura HMAC antiga e chave pública inválida; o script não autoriza `kid` inexistente nem chave pública fora do formato; o e2e gera o par por `public/assinatura.js` e grava a pública em `chaves-comandos.json` como o script faria.
