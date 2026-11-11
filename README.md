@@ -1,28 +1,57 @@
 # moises
 
-Painel pessoal das minhas sessões do Claude Code, para abrir no celular: o que cada sessão está fazendo, quanto gasta, com qual modelo e esforço; encerrar uma sessão pelo site com log nomeado; ideias de próximo passo e recomendação de modelo/esforço.
+Painel pessoal das minhas sessões do Claude Code, para abrir no celular: o que cada sessão está fazendo, quanto gasta, com qual modelo e esforço; abrir sessão, mandar mensagem, aprovar ou negar permissão, interromper e encerrar pelo site; histórico de logs; ideias de próximo passo e recomendação de modelo/esforço.
 
 ## Como funciona
 
 ```
 [coletor local: collector/]  lê ~/.claude*/sessions e ~/.claude*/projects (transcripts + subagentes)
-        │  POST /api/ingest a cada 20 s (só metadados; texto livre passa por redigir.js)
+        │  POST /api/ingest a cada 20 s, ou a cada 3 s com o painel aberto
+        │  (metadados e texto curto mascarado por redigir.js; volta com os comandos assinados)
         ▼
-[Vercel: api/ + public/]  ←→  Upstash Redis (retrato, pedidos, logs)
+[Vercel: api/ + public/]  ←→  Upstash Redis (retrato, comandos, logs)
         ▲
-   eu no celular (login por senha)
+   eu no celular (login por senha; comandos assinados com a chave do aparelho)
 ```
 
-- **Nada de código, prompt, segredo ou variável de ambiente sai da máquina.** Sobem: nome da pasta do projeto, título e resumo gerados pelo Claude (com segredos, e-mails e telefones mascarados), status, horários, modelo, esforço, tokens e custo.
+- **O que sai da máquina:** ver "O que sai da máquina e para onde", mais abaixo. Código, segredo e variável de ambiente nunca saem. Sobem metadados (nome da pasta do projeto, título e resumo gerados pelo Claude, status, horários, modelo, esforço, tokens e custo) e, para comandar, um pouco de texto: última resposta, primeiro pedido e pedido de permissão.
 - **Custo** é estimado em preço de API (`collector/precos.js`), contando cada resposta uma vez — inclusive quando uma sessão retomada copia o histórico de outra: a resposta fica com a sessão de origem — e somando os subagentes. Quando a sessão tem o `cost-state` oficial do Claude Code, ele corrige o total (inclui chamadas que não vão para o transcript). Valores sem essa conferência aparecem com "≈".
 - **Status**: `busy`/`shell` → ativa; `idle` há menos de 15 min → aguardando você; mais de 15 min → ociosa; processo morto → encerrada.
-- **Encerrar** grava um pedido; o coletor só manda `SIGTERM` se pid, `sessionId`, início do processo (`procStart`, obrigatório) e executável do Claude Code baterem, e o pedido expira em 2 min. Limites locais, que o site não consegue mudar: no máximo 5 encerramentos por hora (`MOISES_ENCERRAR_POR_HORA`), pedido repetido é ignorado e `MOISES_ENCERRAR=0` desliga a função. Depois grava o log (nome editável, resumo, duração, modelo, custo) no Histórico, que guarda os 500 mais recentes.
+- **Encerrar uma sessão aberta à mão** vira um comando assinado (como todos). O coletor só manda `SIGTERM` se pid, `sessionId`, início do processo (`procStart`, obrigatório) e executável do Claude Code baterem, e o pedido expira em 2 min. Limites locais, que o site não consegue mudar: no máximo 5 encerramentos por hora (`MOISES_ENCERRAR_POR_HORA`), pedido repetido é ignorado e `MOISES_ENCERRAR=0` desliga a função. Depois grava o log (nome editável, resumo, duração, modelo, custo) no Histórico, que guarda os 500 mais recentes.
 - **Ideias e recomendação** (v3): o coletor chama `claude -p --model haiku` com contexto mínimo (~US$ 0,0002 por chamada), só para sessões abertas, só quando título/resumo mudam e no máximo a cada 10 min por sessão (teto de 80/dia). A recomendação de modelo/esforço sai de regras fixas em `collector/ideias.js`. O gasto aparece no painel.
+
+## Orquestração: comandar sessões pelo painel
+
+Decisão e comparação dos caminhos em [`docs/orquestracao/ADR-001-orquestracao.md`](docs/orquestracao/ADR-001-orquestracao.md); plano em [`docs/orquestracao/PLANO.md`](docs/orquestracao/PLANO.md).
+
+- **Quem pode ser comandada.** Só a sessão que **nasce no painel** ("Nova sessão") ou que o painel **retoma** depois de fechada. Ela roda sem janela de terminal, como um processo `claude -p` em `stream-json` conduzido pelo coletor. Sessões abertas à mão no terminal continuam só com **ver e encerrar** (e ganham estado ao vivo, tarefa e última resposta). Uma sessão é do terminal ou do painel, nunca dos dois: para levar uma do painel ao terminal, encerre no painel e rode `claude --resume <id>`.
+- **Seis verbos:** `abrir`, `mensagem`, `permissao` (aprovar ou negar), `interromper`, `encerrar` e `retomar`. Cada comando sai do aparelho **assinado** com uma chave que mora só nele e no computador; o servidor e o Redis só transportam. O coletor confere assinatura, validade (2 min), repetição e se a sessão é a que você viu na tela, e só então executa. Quem tiver só o Redis, o cookie ou o token do coletor não consegue comandar nada. Detalhes e riscos que ficam com o dono na ADR.
+- **Sessões do painel nascem isoladas.** Sem seus plugins, servidores MCP, hooks, skills, comandos de barra nem regras de permissão: só o `CLAUDE.md` do projeto e seis ferramentas (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`). Motivo: uma sessão dirigida de fora não pode herdar um "permitir sempre" ou um hook que aprove sozinho. Para mudar a lista de ferramentas, use `MOISES_FERRAMENTAS` no computador; o painel não muda isso. Nunca há `bypassPermissions`; os modos aceitos são `manual`, `acceptEdits` e `plan`. O processo filho recebe um ambiente mínimo (sem `MOISES_*`, sem agente de SSH) e o coletor encerra a sessão se o `init` vier com modo de permissão, MCP ou ferramentas diferentes do esperado.
+- **Aprovar permissão** só é possível quando o pedido foi publicado inteiro e o painel assina a impressão digital do que você viu; pedido cortado, com trecho mascarado ou com caractere invisível só pode ser negado. Pedido sem resposta em 30 min é negado (`MOISES_PERMISSAO_EXPIRA_MIN`).
+- **Limites locais**, que o painel não muda: 4 sessões comandadas abertas, 20 aberturas por dia, 30 comandos por minuto, US$ 5 de gasto por sessão (`--max-budget-usd` do Claude Code) e só projetos da lista local. `MOISES_COMANDOS=0` desliga tudo.
+- **Auditoria local** em `~/.local/state/moises/auditoria.jsonl` (permissão 600): quando, qual aparelho, sessão, verbo, aceito ou recusado e o resultado. O texto das mensagens não entra.
+- **Reiniciar o serviço encerra as sessões comandadas.** Elas aparecem como encerradas e dá para **retomar** pelo painel (se a pasta delas estiver na lista de projetos). Por elas rodarem no mesmo grupo do serviço, a unidade do systemd usa `MemoryHigh=4G`.
+
+### O que sai da máquina e para onde
+
+Tudo passa pela Vercel (função em `iad1`) e pelo Upstash Redis (região `iad1`, EUA), **sem cifra de ponta a ponta**: a Vercel e o Upstash conseguem ler o texto enquanto ele passa.
+
+| Texto | Sobe? | Limite | Tratamento |
+|---|---|---|---|
+| Última resposta do Claude | sim | 1.200 caracteres | mascarado por `redigir.js` |
+| Primeiro pedido da sessão (vira a "tarefa" quando não há título nem resumo) | sim | 140 caracteres | mascarado; **não** vai para o Histórico nem para as ideias |
+| Pedido de permissão (ferramenta e entrada) | sim | 4.000 caracteres, com quebras de linha | mascarado; caractere invisível vira `\u{…}` visível |
+| Mensagem ou pedido inicial que você digita | desce, do painel ao coletor | 6.000 caracteres | sai do Redis quando o coletor confirma o recebimento ou o comando expira |
+
+Mascarados: segredos, e-mails, telefones, CPF, CNPJ, cartão (número que passa no Luhn) e CEP. Para **não subir texto nenhum**, ponha `MOISES_SUBIR_TEXTO=0` no ambiente do coletor: o painel continua comandando, mas sem mostrar resposta nem primeiro pedido, e todo pedido de permissão só pode ser negado.
 
 ## Uso
 
 ```bash
-npm test                      # testes do coletor e da API
+npm test                      # testes do coletor, da API, do canal de comandos e do orquestrador
+npm run lint                  # confere a sintaxe de todos os .js
+npm run build                 # confere vercel.json e que cada rota de api/ carrega
+npm run e2e                   # prova de ponta a ponta com o Claude Code de verdade (gasta centavos; ver abaixo)
 PORT=3800 node scripts/dev.js # painel local com Redis em memória (sem Vercel)
 npm run retrato               # imprime o retrato atual, sem enviar
 node scripts/configurar.js https://<painel>.vercel.app   # gera senha, token e segredos em ~/.config/moises/
@@ -32,8 +61,78 @@ journalctl --user -u moises-coletor -f
 
 Rodar `configurar.js` de novo gera **outro** `MOISES_TOKEN` e `SESSION_SECRET` (a senha é mantida): é preciso atualizar as variáveis na Vercel e publicar de novo.
 
-Onde ficam os dados: Vercel (função em `iad1`) e Upstash Redis (região `iad1`, EUA). Sobem só metadados e resumos com segredos, e-mails, telefones, CPF e CNPJ mascarados; o retrato é sobrescrito a cada envio e os logs ficam até sair dos 500 mais recentes. O deploy é pela CLI (`vercel deploy --prod`): o repositório não está ligado à Vercel.
+Onde ficam os dados: Vercel (função em `iad1`) e Upstash Redis (região `iad1`, EUA). Sobem metadados e os textos da tabela acima, com segredos, e-mails, telefones, CPF e CNPJ mascarados; o retrato é sobrescrito a cada envio, o conteúdo de um comando é apagado do Redis na confirmação ou na expiração, e os logs ficam até sair dos 500 mais recentes. O deploy é pela CLI (`vercel deploy --prod`): o repositório não está ligado à Vercel.
 
 Variáveis na Vercel: `PANEL_PASSWORD_HASH`, `SESSION_SECRET`, `MOISES_TOKEN` (de `~/.config/moises/vercel.env`) e `KV_REST_API_URL`/`KV_REST_API_TOKEN` (da integração Upstash). A senha do painel fica em `~/.config/moises/senha-painel.txt`.
+
+## Configuração local da orquestração
+
+Tudo isto é feito por você, no computador onde o coletor roda. O painel não consegue mudar nada daqui.
+
+**1. Lista de projetos.** Sem ela, nenhum projeto pode ser aberto pelo painel. Crie `~/.config/moises/projetos.json` com `{"nome": "/caminho/absoluto"}`; o nome tem de casar com `[A-Za-z0-9._-]`, até 60 caracteres, e o caminho tem de ser absoluto:
+
+```json
+{ "moises": "/home/<você>/Documentos/saas/moises", "site": "/home/<você>/projetos/site" }
+```
+
+O coletor relê o arquivo a cada "abrir"; não precisa reiniciar. O `configurar-comandos.js` cria o arquivo com `{}` se ele não existir.
+
+**2. Autorizar um aparelho.** Cada celular ou computador tem o seu código e pode ser revogado sozinho:
+
+```bash
+node scripts/configurar-comandos.js "Celular"   # gera ~/.config/moises/codigo-<kid>.txt (600) e a chave em chaves-comandos.json (600)
+node scripts/configurar-comandos.js --listar    # mostra kid e rótulo dos aparelhos autorizados
+node scripts/configurar-comandos.js --revogar <kid>   # tira o aparelho; vale no próximo comando, sem reiniciar
+```
+
+Abra `codigo-<kid>.txt`, **digite o código no aparelho** (o painel o pede no primeiro comando) e **apague o arquivo**. O script não imprime o código, e o servidor nunca o recebe: o navegador guarda só uma chave derivada, que não dá para extrair ou copiar. Não toca em `coletor.env`, `vercel.env` nem `senha-painel.txt`. A pasta pode mudar com `MOISES_PASTA_CONF`.
+
+**3. Variáveis do coletor.** Vão em `~/.config/moises/coletor.env` (ou no ambiente, que tem precedência). Valor fora da faixa vale o padrão, com um aviso no log.
+
+| Variável | Padrão | Faixa | O que faz |
+|---|---|---|---|
+| `MOISES_MAX_SESSOES` | 4 | 1 a 50 | sessões comandadas abertas ao mesmo tempo |
+| `MOISES_MAX_ABRIR_DIA` | 20 | 0 a 1000 | aberturas pelo painel por dia (0 impede abrir) |
+| `MOISES_TETO_SESSAO_USD` | 5 | 0,01 a 100 | gasto máximo de uma sessão comandada (`--max-budget-usd`) |
+| `MOISES_FERRAMENTAS` | `Bash,Read,Edit,Write,Glob,Grep` | nomes separados por vírgula | ferramentas das sessões comandadas |
+| `MOISES_PERMISSAO_EXPIRA_MIN` | 30 | 1 a 1440 | minutos até um pedido sem resposta ser negado |
+| `MOISES_INTERVALO_MS` | 20000 | 1000 a 3600000 | intervalo normal de envio |
+| `MOISES_INTERVALO_RAPIDO_MS` | 3000 | 1000 a 60000 | intervalo com o painel aberto ou com sessão comandada aberta |
+| `MOISES_CHAVES_ARQ` | `~/.config/moises/chaves-comandos.json` | caminho | arquivo das chaves dos aparelhos (a chave nunca vem de variável) |
+| `MOISES_PROJETOS` | `~/.config/moises/projetos.json` | caminho | lista de projetos que o painel pode abrir |
+| `MOISES_SO_PREFIXO` | (vazio) | texto | uso de teste: só vê e comanda sessões cujo nome começa por ele |
+
+As duas abaixo, e também `MOISES_ENCERRAR` e `MOISES_ENCERRAR_POR_HORA` (padrão 5), são lidas **só do ambiente do processo**, não do `coletor.env`:
+
+| Variável | Padrão | O que faz |
+|---|---|---|
+| `MOISES_COMANDOS` | ligado | `0` recusa todo comando |
+| `MOISES_SUBIR_TEXTO` | ligado | `0` não sobe resposta, primeiro pedido nem pedido de permissão |
+
+No serviço do systemd, ponha com `systemctl --user edit moises-coletor`, escrevendo `[Service]` e `Environment=MOISES_SUBIR_TEXTO=0`, e reinicie.
+
+**4. Serviço.** A unidade em `collector/systemd/moises-coletor.service` usa `MemoryHigh=4G`. Se você instalou a versão antiga (400M), copie de novo para `~/.config/systemd/user/` e rode `systemctl --user daemon-reload`. Reiniciar o serviço encerra as sessões comandadas (retomáveis pelo painel). Para ver o que o coletor aceitou ou recusou: `~/.local/state/moises/auditoria.jsonl`.
+
+## Ordem segura de publicação
+
+O coletor novo e o painel novo precisam entrar nesta ordem:
+
+1. **Atualize o código do coletor e reinicie-o** (`systemctl --user restart moises-coletor`; confira com `journalctl --user -u moises-coletor -n 20` a linha "comandos desligados (sem_chave)").
+2. **Publique o painel novo** (`vercel deploy --prod`).
+3. **Só então crie os códigos dos aparelhos** (passo 2 acima) e digite cada um no aparelho.
+
+Por quê: o coletor antigo executava `encerrar` **sem assinatura** e **não entende os verbos novos**. Com o painel novo diante de um coletor antigo, os comandos assinados seriam ignorados, e quem tivesse o Redis, o cookie e o token ainda conseguiria encerrar sessões sem chave nenhuma. O coletor novo recusa todo comando enquanto não houver aparelho autorizado; por isso os códigos só nascem depois que ele está de pé. Entre os passos 1 e 2, o botão Encerrar do painel antigo é recusado (não tem assinatura); é um intervalo curto.
+
+## Prova de ponta a ponta
+
+`npm run e2e` exercita as cinco capacidades com o Claude Code de verdade. Sobe o painel local (`scripts/dev.js`, Redis em memória) e o coletor no próprio processo, com segredos e chave de aparelho gerados na hora (não lê `~/.config/moises` nem fala com o painel publicado), abre **uma** sessão `moises-teste-…` com Haiku e imprime uma linha `passou` ou `falhou` para cada item: abrir com um pedido, ver estado e última resposta, mandar mensagem e ver a resposta, aprovar e negar um pedido de permissão, interromper e encerrar, mais o custo da sessão. Sai com código 1 se algum falhar e confere no fim que não sobrou processo. Custa **alguns centavos de dólar** e leva alguns minutos.
+
+Antes da primeira vez, crie a sandbox: **uma pasta própria, fora de `~/Documentos`, que seja repositório git**.
+
+```bash
+mkdir ~/moises-sandbox && cd ~/moises-sandbox && git init
+```
+
+O teste recusa outra pasta (`MOISES_E2E_SANDBOX` troca o caminho; `MOISES_E2E_VERBOSO=1` mostra a saída do painel). Rode-o depois de atualizar o Claude Code: o protocolo de controle que o coletor usa não está descrito no `--help`.
 
 Contrato da API: [`docs/api.md`](docs/api.md). Plano e decisões: [`docs/plano.md`](docs/plano.md).
