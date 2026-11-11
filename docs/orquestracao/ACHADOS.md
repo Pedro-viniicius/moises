@@ -84,16 +84,19 @@ Verificação das correções da rodada 2: `seguranca` (sem crítica nem alta; C
 | S28-a (= Q5) | Baixa | `coletor.env` com CRLF tinha as linhas ignoradas. | Corrigido (3bb062c). |
 | S28-b | Baixa | Valor estranho em `MOISES_CONFERIR_PAINEL` desligava a conferência (lado inseguro). | Corrigido: valor não reconhecido mantém a conferência ligada. |
 | R10 | Sugestão | Script aceitava `kid` alfanumérico. | Corrigido: regex única hexadecimal. |
-| CR1 | Média | `abrir` respondia "feito" no primeiro evento, antes do `init` conferido. | Corrigir: sucesso só depois do `init` conferido. |
-| CR2 (= RB2) | Média | `interromper` e o `result` tiravam pedidos pendentes sem mandar "negar" ao Claude Code. | Corrigir: deny explícito antes de tirar. |
-| CR3 | Média | Filho que não morre nem com SIGKILL segurava a vaga para sempre. | Corrigir: o registro é finalizado com aviso no log. |
-| CR4 | Baixa | A cota diária não voltava quando o `spawn` falhava. | Corrigir. |
+| CR1 | Média | `abrir` respondia "feito" no primeiro evento, antes do `init` conferido. | Corrigido (0a88d71): sucesso só depois do `init` conferido. |
+| CR2 (= RB2) | Média | `interromper` e o `result` tiravam pedidos pendentes sem mandar "negar" ao Claude Code. | Corrigido (0a88d71): deny explícito antes de tirar. |
+| CR3 | Média | Filho que não morre nem com SIGKILL segurava a vaga para sempre. | Corrigido (0a88d71): o registro é finalizado com aviso no log. |
+| CR4 | Baixa | A cota diária não voltava quando o `spawn` falhava. | Corrigido (0a88d71). |
 | CR5 | Baixa | O teto de 20 pendentes no servidor é contado e gravado sem atomicidade. | Em aberto (baixa): o excedente só expira; o porteiro do coletor continua valendo. |
-| CR6 | Baixa | Corpo `null` no ingest dava 500. | Corrigir: 400. |
-| CR7, CR8 | Limpeza | Constantes do contrato duplicadas entre porteiro, orquestrador e servidor. | Corrigir: uma fonte só. |
-| CR9 | Limpeza | Limpeza do cache de pastas em O(n·m) a cada ciclo. | Fica para o `/simplify`. |
-| CR10 | Baixa | Contagem de testes desatualizada no `CLAUDE.md`. | Corrigir no fim. |
+| CR6 | Baixa | Corpo `null` no ingest dava 500. | Corrigido (0a88d71): 400. |
+| CR7, CR8 | Limpeza | Constantes do contrato duplicadas entre porteiro, orquestrador e servidor. | Corrigido (0a88d71 e 87d33bb): `collector/contrato.js`; as cópias de `api/` e `public/` são conferidas por teste. |
+| CR9 | Limpeza | Limpeza do cache de pastas em O(n·m) a cada ciclo. | Corrigido no `/simplify` (87d33bb), junto com a leitura única de `projetos.json` e das pastas dos projetos por ciclo. |
+| CR10 | Baixa | Contagem de testes desatualizada no `CLAUDE.md`. | Corrigido: 375. |
 | RB3 | Sugestão | Sessão aberta com worktree pode trocar o nome do projeto no cartão na transição. | Em aberto (visual; sem teste real de worktree). |
 | RB4 | Sugestão | "Sair" apaga a chave do aparelho sem avisar que será preciso autorizar de novo. | Em aberto (texto de interface, para o designer). |
 | RB5 | Baixa | Quem tem só o cookie ocupa as 5 vagas de pedido de pareamento por 1 h. | Em aberto (mesmo padrão do A4; o cookie já é credencial do dono). |
 | — | Baixa (qa) | `MOISES_FERRAMENTAS` toda digitada errado volta às seis padrão. | Registrado: o padrão é a lista conservadora; o aviso fica no log. |
+| R11, R12 | Sugestão | Comentários fora do lugar depois da limpeza. | Corrigidos. |
+
+`/simplify` (quatro revisores: reaproveitamento, simplificação, eficiência e altitude): gravação atômica 600 única (`escreverAtomico`), contrato e configuração em módulos próprios (`collector/contrato.js`, `collector/config.js`), chave de sessão partida num lugar só, laço sem E/S repetida, `export`s sem uso removidos; `pastaSoDoDono` passou a valer em todas as gravações e nunca toca a pasta pessoal nem a raiz. Pulados de propósito: IDs de achado nos comentários (ligam o código a este arquivo) e um leitor de JSON genérico (a política de erro muda de um chamador para outro).

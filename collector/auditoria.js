@@ -37,8 +37,6 @@ function primeiraFrase(valor) {
 // `auditoria.jsonl` → `auditoria-recusas.jsonl`, na mesma pasta.
 const nomeDasRecusas = (arquivo) => path.join(path.dirname(arquivo), `${path.basename(arquivo, '.jsonl')}-recusas.jsonl`);
 
-// Cria a pasta só para o dono e, se ela já existir mais aberta e for deste usuário, fecha para 700:
-// quem pudesse apagar arquivos dela (comandos-vistos.json) desarmaria a proteção contra repetição.
 // Caminho real, ou o caminho absoluto se ele não existe (uma pasta pessoal que não existe não é esta pasta).
 function caminhoReal(p) {
   try {
@@ -48,6 +46,8 @@ function caminhoReal(p) {
   }
 }
 
+// Cria a pasta só para o dono e, se ela já existir mais aberta e for deste usuário, fecha para 700:
+// quem pudesse apagar arquivos dela (comandos-vistos.json) desarmaria a proteção contra repetição.
 export function pastaSoDoDono(pasta) {
   fs.mkdirSync(pasta, { recursive: true, mode: 0o700 });
   // Nunca a pasta pessoal nem a raiz: um arquivo de configuração posto direto em ~ não fecha a casa inteira.

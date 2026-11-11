@@ -1,7 +1,7 @@
 // Constantes do contrato dos comandos com uma fonte só no coletor: o porteiro (collector/comandos.js), o
 // orquestrador, a assinatura, o laço (collector/index.js) e o script de pareamento importam daqui. O
 // servidor (api/_lib.js) e o painel (public/) têm cópias próprias, porque não podem importar collector/;
-// test/contrato.test.js confere que continuam iguais a estas.
+// test/limpeza.test.js confere que continuam iguais a estas.
 
 // Os seis verbos do canal de comandos.
 export const TIPOS = Object.freeze(['abrir', 'mensagem', 'permissao', 'interromper', 'encerrar', 'retomar']);
