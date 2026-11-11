@@ -6,6 +6,9 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test test/*.test.js",
+    "lint": "node scripts/lint.js",
+    "build": "node scripts/build.js",
+    "e2e": "node test/e2e/orquestracao.e2e.js",
     "coletor": "node collector/index.js",
     "retrato": "MOISES_IDEIAS_TETO_DIA=0 node collector/index.js --uma-vez",
     "configurar": "node scripts/configurar.js"
