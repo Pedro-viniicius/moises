@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Moisés · Sessões do Claude Code</title>
   <link rel="stylesheet" href="/style.css">
@@ -10,7 +10,13 @@
 <body>
   <div class="coluna">
     <header class="topo">
-      <h1>Moisés</h1>
+      <div class="topo-marca">
+        <span class="marca" aria-hidden="true">M</span>
+        <div>
+          <h1>Moisés</h1>
+          <span class="topo-sub">Sessões do Claude Code</span>
+        </div>
+      </div>
       <button class="btn btn-leve" id="sair" type="button">Sair</button>
     </header>
 
@@ -23,13 +29,15 @@
 
     <section id="painel-sessoes" role="tabpanel" aria-labelledby="aba-sessoes">
       <div class="resumo" id="resumo" hidden>
-        <div class="resumo-rotulo">Total de hoje</div>
+        <div class="resumo-cab">
+          <div class="resumo-rotulo">Total de hoje</div>
+          <div class="coletor" id="coletor" role="status"></div>
+        </div>
         <div class="resumo-total" id="resumo-total">—</div>
         <div class="resumo-linha">
           <span id="resumo-top" hidden></span>
           <span id="resumo-ideias" class="num" hidden></span>
         </div>
-        <div class="coletor" id="coletor" role="status"></div>
       </div>
 
       <div class="filtro" role="group" aria-label="Filtro de sessões">

@@ -83,10 +83,10 @@ function nomePadrao(s) {
 }
 
 const STATUS = {
-  ativa: { rotulo: 'Ativa', icone: '●' },
-  aguardando: { rotulo: 'Aguardando você', icone: '◐' },
-  ociosa: { rotulo: 'Ociosa', icone: '○' },
-  encerrada: { rotulo: 'Encerrada', icone: '■' },
+  ativa: { rotulo: 'Ativa' },
+  aguardando: { rotulo: 'Aguardando você' },
+  ociosa: { rotulo: 'Ociosa' },
+  encerrada: { rotulo: 'Encerrada' },
 };
 
 /* ---------- Rede ---------- */
@@ -214,7 +214,7 @@ function criarCartao(s) {
   const tarefa = el('span', 'tarefa');
   const l3 = el('span', 'l3');
   const selo = el('span', 'selo');
-  const modelo = el('span');
+  const modelo = el('span', 'modelo');
   l3.append(selo, modelo);
   const atividade = el('span', 'atividade');
   const meta = el('span', 'meta');
@@ -432,9 +432,10 @@ function atualizarCartao(c) {
 
   c.tarefa.textContent = s.tarefa || 'Sem tarefa registrada';
 
-  const st = STATUS[s.status] || { rotulo: s.status || '—', icone: '○' };
+  const st = STATUS[s.status] || { rotulo: s.status || '—' };
   c.selo.className = 'selo selo-' + (STATUS[s.status] ? s.status : 'ociosa');
-  c.selo.textContent = st.icone + ' ' + st.rotulo;
+  c.selo.textContent = st.rotulo;
+  c.art.dataset.status = STATUS[s.status] ? s.status : 'ociosa';
   c.modelo.textContent = modeloLegivel(s.modelo) + (s.esforco ? ' · ' + s.esforco : '');
 
   c.atividade.textContent = s.ultimaAtividade
