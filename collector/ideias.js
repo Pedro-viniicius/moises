@@ -5,10 +5,16 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { escreverAtomico } from './auditoria.js';
 import { diaLocal } from './transcript.js';
 
 const INTERVALO_MIN_MS = 10 * 60_000; // por sessão
-const TETO_DIA = Number(process.env.MOISES_IDEIAS_TETO_DIA || 80);
+// Lido na construção, não na importação: quem cria o Ideias depois de ajustar o ambiente vê o valor novo.
+const tetoDoAmbiente = () => Number(process.env.MOISES_IDEIAS_TETO_DIA || 80);
+
+// A tarefa que alimenta as ideias. Se ela veio do primeiro pedido, vai o nome da sessão no lugar:
+// o texto de um pedido não alimenta as ideias que sobem ao site (PLANO, tarefa 7).
+const tarefaDe = (s) => (s.tarefaOrigem === 'pedido' ? s.nome || null : s.tarefa);
 
 export const TIER = (m = '') => (/fable|mythos/.test(m) ? 4 : /opus/.test(m) ? 3 : /sonnet/.test(m) ? 2 : /haiku/.test(m) ? 1 : 0);
 const NIVEL = { low: 1, medium: 2, high: 3, xhigh: 4, max: 5 };
@@ -41,7 +47,7 @@ export function montarPergunta(s) {
   return [
     'Metadados de uma sessão do Claude Code (assistente de programação):',
     `- projeto: ${s.projeto}`,
-    `- tarefa atual: ${s.tarefa || '(sem título)'}`,
+    `- tarefa atual: ${tarefaDe(s) || '(sem título)'}`,
     `- resumo: ${s.resumo || '(sem resumo)'}`,
     '',
     'Responda com JSON: {"complexidade":"mecanica|moderada|complexa","ideias":["...","..."],"motivo":"..."}',
@@ -86,13 +92,15 @@ export function chamarHaiku(pergunta, { cwd, timeoutMs = 90_000 } = {}) {
 }
 
 export class Ideias {
-  constructor({ pastaEstado, chamar = chamarHaiku, agora = () => Date.now() }) {
+  constructor({ pastaEstado, chamar = chamarHaiku, agora = () => Date.now(), tetoDia = tetoDoAmbiente() }) {
     this.arquivo = path.join(pastaEstado, 'ideias.json');
     this.pasta = pastaEstado;
     this.chamar = chamar;
     this.agora = agora;
+    this.tetoDia = tetoDia;
     this.ocupado = false;
-    fs.mkdirSync(this.pasta, { recursive: true });
+    // A pasta de estado também guarda comandos-vistos.json: nasce só do dono, qualquer que seja a umask.
+    fs.mkdirSync(this.pasta, { recursive: true, mode: 0o700 });
     try {
       this.d = JSON.parse(fs.readFileSync(this.arquivo, 'utf8'));
     } catch {
@@ -102,14 +110,11 @@ export class Ideias {
 
   // Grava num temporário e renomeia: um corte no meio não zera o teto diário.
   salvar() {
-    fs.mkdirSync(this.pasta, { recursive: true });
-    const tmp = `${this.arquivo}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.d));
-    fs.renameSync(tmp, this.arquivo);
+    escreverAtomico(this.arquivo, JSON.stringify(this.d));
   }
 
   assinatura(s) {
-    return crypto.createHash('sha1').update([s.projeto, s.tarefa, s.resumo].join('|')).digest('hex');
+    return crypto.createHash('sha1').update([s.projeto, tarefaDe(s), s.resumo].join('|')).digest('hex');
   }
 
   // Anexa a sugestão já conhecida a cada sessão e dispara no máximo uma geração nova por vez.
@@ -122,8 +127,8 @@ export class Ideias {
     }
     retrato.custoIdeiasHoje = Math.round((this.d.gastoPorDia[hoje] || 0) * 10000) / 10000;
     if (!this.ocupado) {
-      const alvo = retrato.sessoes.find((s) => s.status !== 'encerrada' && (s.tarefa || s.resumo) && this.precisa(s));
-      if (alvo && (this.d.chamadasPorDia[hoje] || 0) < TETO_DIA) {
+      const alvo = retrato.sessoes.find((s) => s.status !== 'encerrada' && (tarefaDe(s) || s.resumo) && this.precisa(s));
+      if (alvo && (this.d.chamadasPorDia[hoje] || 0) < this.tetoDia) {
         this.gerar(alvo, hoje).catch((err) => console.error('[ideias] falha:', err.message));
       }
     }

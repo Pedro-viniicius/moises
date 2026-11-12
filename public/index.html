@@ -36,8 +36,17 @@
         <div class="resumo-total" id="resumo-total">—</div>
         <div class="resumo-linha">
           <span id="resumo-top" hidden></span>
+          <span id="resumo-permissao" class="resumo-permissao num" hidden></span>
           <span id="resumo-ideias" class="num" hidden></span>
         </div>
+      </div>
+
+      <div id="banner-coletor" class="banner" role="status" hidden></div>
+
+      <div class="nova">
+        <button type="button" class="btn btn-primario btn-largo" id="nova-sessao" aria-describedby="nova-motivo" disabled>Nova sessão</button>
+        <p class="acao-estado" id="nova-motivo"></p>
+        <div id="abrir-andamento"></div>
       </div>
 
       <div class="filtro" role="group" aria-label="Filtro de sessões">
@@ -60,7 +69,148 @@
       <p class="mensagem-vazia" id="logs-erro" role="alert" hidden>Não foi possível carregar o histórico.</p>
       <ul class="lista" id="logs"></ul>
     </section>
+
+    <section class="aparelho" aria-labelledby="aparelho-titulo">
+      <h2 id="aparelho-titulo">Este aparelho</h2>
+      <p id="aparelho-texto">Este aparelho ainda não está autorizado a mandar comandos.</p>
+      <p class="meta" id="aparelho-sair" hidden>Sair do painel também esquece este aparelho.</p>
+      <div class="botoes" id="aparelho-botoes">
+        <button type="button" class="btn" id="aparelho-autorizar">Autorizar este aparelho</button>
+        <button type="button" class="btn btn-leve" id="aparelho-instrucoes" hidden>Ver como autorizar</button>
+        <button type="button" class="btn btn-leve" id="aparelho-esquecer" hidden>Esquecer este aparelho</button>
+      </div>
+      <div class="confirmar" id="aparelho-confirmar" hidden>
+        <p>Este aparelho vai apagar a chave dele e deixar de mandar comandos. Para voltar, será preciso autorizá-lo de novo no computador.</p>
+        <div class="botoes">
+          <button type="button" class="btn btn-perigo" id="aparelho-esquecer-sim">Esquecer este aparelho</button>
+          <button type="button" class="btn" id="aparelho-esquecer-nao">Cancelar</button>
+        </div>
+      </div>
+      <p class="acao-estado" id="aparelho-status" role="status"></p>
+    </section>
   </div>
-  <script src="/app.js"></script>
+
+  <div id="anuncios" class="so-leitor" aria-live="polite"></div>
+
+  <dialog id="dlg-nova" class="dialogo" aria-labelledby="nova-titulo">
+    <div class="dialogo-cab">
+      <h2 id="nova-titulo" tabindex="-1">Nova sessão</h2>
+      <button type="button" class="btn btn-leve" id="nova-fechar">Fechar</button>
+    </div>
+
+    <form id="nova-form" novalidate>
+      <p class="meta">Sessões abertas pelo painel rodam isoladas: sem seus plugins, servidores MCP, skills e comandos de barra, e só com as ferramentas básicas (Bash, Read, Edit, Write, Glob, Grep).</p>
+      <p class="campo-erro" id="nova-erros" role="alert"></p>
+
+      <div class="campo-grupo">
+        <label for="nova-projeto">Projeto</label>
+        <select class="campo" id="nova-projeto" aria-describedby="nova-projeto-erro"></select>
+        <p class="campo-erro" id="nova-projeto-erro"></p>
+      </div>
+
+      <div class="campo-grupo" id="nova-conta-grupo" hidden>
+        <label for="nova-conta">Conta</label>
+        <select class="campo" id="nova-conta"></select>
+      </div>
+
+      <div class="campo-grupo">
+        <label for="nova-pedido">Pedido inicial</label>
+        <textarea class="campo campo-area" id="nova-pedido" rows="4" aria-describedby="nova-pedido-ajuda nova-pedido-erro"></textarea>
+        <p class="meta" id="nova-pedido-ajuda">Descreva o que a sessão deve fazer primeiro.</p>
+        <p class="campo-erro" id="nova-pedido-erro"></p>
+      </div>
+
+      <div class="campo-grupo">
+        <label for="nova-modelo">Modelo</label>
+        <select class="campo" id="nova-modelo"></select>
+      </div>
+
+      <div class="campo-grupo">
+        <label for="nova-esforco">Esforço</label>
+        <select class="campo" id="nova-esforco"></select>
+      </div>
+
+      <fieldset class="campo-grupo opcoes">
+        <legend>Modo de permissão</legend>
+        <label class="opcao" data-modo="manual">
+          <input type="radio" name="modo" value="manual" checked>
+          <span><span class="opcao-rotulo">Perguntar antes de agir</span>
+          <span class="meta">A sessão pede a sua permissão antes de editar arquivos ou rodar comandos.</span></span>
+        </label>
+        <label class="opcao" data-modo="acceptEdits">
+          <input type="radio" name="modo" value="acceptEdits">
+          <span><span class="opcao-rotulo">Aceitar edições</span>
+          <span class="meta">Edita arquivos sem perguntar; comandos ainda pedem permissão.</span></span>
+        </label>
+        <label class="opcao" data-modo="plan">
+          <input type="radio" name="modo" value="plan">
+          <span><span class="opcao-rotulo">Só planejar</span>
+          <span class="meta">A sessão só propõe um plano, sem mudar nada.</span></span>
+        </label>
+      </fieldset>
+
+      <div class="campo-grupo">
+        <label class="opcao">
+          <input type="checkbox" id="nova-worktree">
+          <span><span class="opcao-rotulo">Trabalhar numa cópia isolada (worktree)</span>
+          <span class="meta">Cria um ramo e uma pasta separados dentro do projeto, sem mexer no seu trabalho principal.</span></span>
+        </label>
+      </div>
+
+      <div class="campo-grupo">
+        <label for="nova-nome">Nome</label>
+        <input class="campo" id="nova-nome" type="text" maxlength="60" autocomplete="off" aria-describedby="nova-nome-ajuda nova-nome-erro">
+        <p class="meta" id="nova-nome-ajuda">Letras, números, espaço, ponto, hífen e sublinhado.</p>
+        <p class="campo-erro" id="nova-nome-erro"></p>
+      </div>
+
+      <div class="botoes">
+        <button type="submit" class="btn btn-primario">Revisar</button>
+      </div>
+    </form>
+
+    <section id="nova-resumo" hidden>
+      <dl class="grade" id="nova-resumo-lista"></dl>
+      <p class="nova-frase" id="nova-resumo-frase"></p>
+      <p class="acao-estado erro" id="nova-envio-erro" role="alert"></p>
+      <div class="botoes">
+        <button type="button" class="btn" id="nova-voltar">Voltar e editar</button>
+        <button type="button" class="btn btn-primario" id="nova-abrir">Abrir sessão</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="dlg-aparelho" class="dialogo" aria-labelledby="autorizar-titulo" aria-describedby="autorizar-texto">
+    <div class="dialogo-cab">
+      <h2 id="autorizar-titulo" tabindex="-1">Autorizar este aparelho</h2>
+      <button type="button" class="btn btn-leve" id="autorizar-fechar">Fechar</button>
+    </div>
+
+    <section id="autorizar-pedir">
+      <p id="autorizar-texto">Este aparelho ainda não pode mandar comandos ao seu computador. Ele vai criar uma chave própria, que não pode ser copiada nem sai daqui, e pedir autorização ao computador. Nada secreto é digitado nesta página.</p>
+      <div class="campo-grupo">
+        <label for="autorizar-rotulo">Nome deste aparelho</label>
+        <input class="campo" id="autorizar-rotulo" type="text" maxlength="40" autocomplete="off" spellcheck="false" aria-describedby="autorizar-rotulo-ajuda autorizar-erro">
+        <p class="meta" id="autorizar-rotulo-ajuda">Aparece no computador na hora de autorizar. Por exemplo: celular do Moisés.</p>
+        <p class="campo-erro" id="autorizar-erro" role="alert"></p>
+      </div>
+      <div class="botoes">
+        <button type="button" class="btn btn-primario" id="autorizar-pedir-btn">Pedir autorização</button>
+      </div>
+    </section>
+
+    <section id="autorizar-aguardando" hidden>
+      <p>Impressão digital deste aparelho:</p>
+      <p class="impressao num" id="autorizar-impressao"></p>
+      <p id="autorizar-instrucao"></p>
+      <pre class="entrada autorizar-comando" id="autorizar-comando" tabindex="0" aria-label="Comando para autorizar este aparelho"></pre>
+      <p class="acao-estado" id="autorizar-status" role="status"></p>
+      <div class="botoes">
+        <button type="button" class="btn btn-leve" id="autorizar-de-novo">Pedir de novo</button>
+      </div>
+    </section>
+  </dialog>
+
+  <script type="module" src="/app.js"></script>
 </body>
 </html>

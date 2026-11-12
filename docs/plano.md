@@ -9,10 +9,13 @@
 - **ADR-6 Encerrar com conferência tripla e expiração de 2 min.** Só o meu clique cria o pedido. Limites locais (5 por hora, sem repetir pedido, chave para desligar) contêm o estrago se o Redis ou a Vercel forem comprometidos.
 - **ADR-7 Ideias com Haiku isolado.** `--strict-mcp-config --disable-slash-commands --setting-sources "" --system-prompt … --tools ""` derruba o custo de US$ 0,38 para US$ 0,0001 por chamada.
 
+- **ADR-8 Orquestração de sessões.** Abrir, conversar, aprovar permissão, interromper, encerrar e retomar pelo painel, com comandos assinados no aparelho e conferidos no coletor. Essa decisão amplia as ADR-1 e ADR-6: o coletor passa a receber comandos de vários verbos (não só encerrar), e o Encerrar também exige assinatura. Decisão, comparação dos caminhos e riscos em [`docs/orquestracao/ADR-001-orquestracao.md`](orquestracao/ADR-001-orquestracao.md); plano de implementação em [`docs/orquestracao/PLANO.md`](orquestracao/PLANO.md).
+
 ## Entregas
 - v1: sessões, gasto, modelo e esforço.
 - v2: encerrar e histórico de logs.
 - v3: ideias e recomendação de modelo/esforço.
+- v4: orquestração de sessões (ADR-8; plano em [`docs/orquestracao/PLANO.md`](orquestracao/PLANO.md)).
 
 ## Riscos
 | Risco | Mitigação |
@@ -21,3 +24,4 @@
 | Custo subestimado em sessões abertas (~5%: títulos, resumos, compactação não vão ao transcript) | Corrigido pelo `cost-state` quando existe; marcado com "≈" |
 | Encerrar o processo errado | ADR-6 |
 | Vazar segredo num resumo | `collector/redigir.js` + teste |
+| Comando forjado por quem controla o Redis, o cookie ou o token; texto de sessão sem cifra na Vercel e no Upstash | ADR-8: assinatura por aparelho, limites locais e `MOISES_SUBIR_TEXTO=0`; riscos que restam em [`docs/orquestracao/ACHADOS.md`](orquestracao/ACHADOS.md) |

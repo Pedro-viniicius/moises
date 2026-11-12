@@ -6,3 +6,6 @@ node_modules/
 
 # memória dos agentes (local, não versionar)
 .claude/agent-memory/
+
+# worktrees de trabalho (locais)
+.claude/worktrees/

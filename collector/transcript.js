@@ -25,7 +25,33 @@ export function novoEstado() {
     modelosDesconhecidos: new Set(),
     linhasRuins: 0,
     custoOficial: null, // último cost-state: { total, inicio }
+    primeiroPedido: null, // texto da primeira mensagem do dono (até MAX_TEXTO)
+    ultimaResposta: null, // último bloco de texto do Claude (até MAX_TEXTO)
+    ultimaRespostaEm: null,
   };
+}
+
+const MAX_TEXTO = 4000;
+
+// Texto de uma mensagem: string, ou os blocos `text` (blocos `tool_result` e outros não contam).
+function textoDe(conteudo) {
+  if (typeof conteudo === 'string') return conteudo;
+  if (!Array.isArray(conteudo)) return '';
+  return conteudo
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n');
+}
+
+// O último bloco `text` não vazio de uma resposta do Claude.
+function ultimoTexto(conteudo) {
+  if (typeof conteudo === 'string') return conteudo.trim() ? conteudo : null;
+  if (!Array.isArray(conteudo)) return null;
+  for (let i = conteudo.length - 1; i >= 0; i--) {
+    const b = conteudo[i];
+    if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) return b.text;
+  }
+  return null;
 }
 
 function processarLinha(est, linha, { principal }) {
@@ -51,6 +77,11 @@ function processarLinha(est, linha, { principal }) {
       if (principal && !e.isSidechain && model && model !== '<synthetic>') {
         est.modelo = model;
         if (e.effort) est.esforco = e.effort;
+        const fala = ultimoTexto(m.content);
+        if (fala) {
+          est.ultimaResposta = fala.slice(0, MAX_TEXTO);
+          est.ultimaRespostaEm = Number.isFinite(ts) ? ts : null;
+        }
       }
       if (!m.usage || !model || model === '<synthetic>') return;
       // A mesma resposta aparece uma vez por bloco de conteúdo: a última leitura vale.
@@ -64,6 +95,13 @@ function processarLinha(est, linha, { principal }) {
         custo: c ?? 0,
         tokens: tokensDe(m.usage),
       });
+      return;
+    }
+    case 'user': {
+      if (!principal || est.primeiroPedido != null || e.isSidechain || e.isMeta) return;
+      const texto = textoDe(e.message?.content).trim();
+      // Mensagens que começam com "<" são comandos e avisos do próprio Claude Code, não pedidos.
+      if (texto && !texto.startsWith('<')) est.primeiroPedido = texto.slice(0, MAX_TEXTO);
       return;
     }
     case 'cost-state':

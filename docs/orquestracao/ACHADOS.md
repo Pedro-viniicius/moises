@@ -1,0 +1,102 @@
+# Achados de revisão e segurança
+
+Cada achado, de onde veio, a gravidade e o que foi feito. "Em aberto" quer dizer: não corrigido neste MVP e levado a você como risco.
+
+## Rodada 0: revisão de segurança do desenho (antes do código)
+
+O agente `seguranca` leu a ADR-001 e o plano antes de qualquer código do canal de comandos. Veredito: **bloqueante**, com quatro achados altos. O desenho foi refeito (PLANO versão 2) e as correções entraram como requisito das tarefas.
+
+| ID | Gravidade | Achado | O que foi feito | Estado |
+|---|---|---|---|---|
+| S1 | Alta | A ADR prometia que quem tomasse a Vercel não criaria comandos. É falso: quem serve o JavaScript do painel pode usar a chave do navegador. | Promessa corrigida na ADR. Chave não extraível no navegador (não dá para copiar), uma chave por aparelho com revogação, tetos locais (sessões, aberturas por dia, gasto por sessão), sessões isoladas e modo de permissão conferido na máquina. | Corrigido no que cabe; **resto em aberto**: a conta da Vercel tomada consegue assinar comandos enquanto o painel estiver aberto num aparelho autorizado. Mitigação futura em `IDEIAS.md` (integridade do código do painel). |
+| S2 | Alta | O pedido de permissão podia aparecer cortado ou mascarado e mesmo assim ser aprovado; o texto mostrado podia ser trocado no caminho. | "Aprovar" só existe para pedido publicado inteiro (`completo`); o comando assina a impressão digital do que apareceu na tela e o coletor compara com o pedido pendente; caracteres invisíveis e de direção de texto viram escape visível; a resposta é montada só pelo coletor, vale uma vez e nunca cria regra permanente; pedido sem resposta em 30 min é negado. | Corrigido (tarefas 5, 6 e 8). |
+| S3 | Alta | A sessão comandada herdaria plugins, MCP, hooks e regras "permitir sempre" do usuário, que podem aprovar sozinhos. | Sessões nascem com `--restricted`, seis ferramentas, `--strict-mcp-config`, `--disable-slash-commands` e `--settings` fixo com o bypass desligado; o coletor confere cada `init` e encerra a sessão se divergir. Testado na sandbox (spike B6). | Corrigido (tarefa 6). |
+| S4 | Alta | O processo da sessão herdaria o ambiente do coletor (token, chave) e poderia ler `~/.config/moises`. | Ambiente por lista branca; chave de comandos só em arquivo 600, nunca em variável; regras fixas de negação para `~/.config/moises`, `~/.ssh` e `~/.local/state/moises`; pedido que toca esses caminhos aparece marcado como sensível. | Corrigido no que cabe; **resto em aberto**: um comando `Bash` que você aprovar roda com o seu usuário e alcança os seus arquivos. É o mesmo risco de aprovar no terminal. |
+| S5 | Média | Ordem das conferências e o registro de repetição permitiam esquecer um id (poda por quantidade) ou executar sem gravar. | Ordem fixa (formato → aparelho → assinatura → validade → repetição → ritmo); id gravado em disco antes de executar; poda só por tempo; falha de gravação recusa. | Corrigido (tarefa 3). |
+| S6 | Média | O comando não dizia sobre qual sessão o dono achava que estava agindo; o retrato e as confirmações do coletor não são autenticados. | O comando leva `visto` (projeto e nome exibidos) e o coletor recusa se a sessão real for outra. | Parte corrigida; **em aberto**: quem controla o Redis pode mostrar estado falso, atrasar ou sumir com confirmações (não consegue executar nada). |
+| S7 | Média | Texto assinado por concatenação permitia ambiguidade entre campos; o Encerrar antigo passava sem assinatura. | Texto assinado é um JSON de lista com prefixo de versão; cada campo é validado por expressão regular antes da assinatura; todo comando sem verbo ou sem assinatura é recusado; o ramo antigo sai. | Corrigido (tarefas 2, 3 e 7). |
+| S8 | Média | Valores vindos do painel poderiam virar opção de linha de comando (`--nome` começando com `-`, worktree livre). | Todo argumento na forma `--flag=valor`; nome não começa com `-`; worktree é booleano e o nome é gerado pelo coletor; ids validados como UUID; a mensagem vai sempre embrulhada pelo coletor. | Corrigido (tarefa 6). |
+| S9 | Média | Uma variável de ambiente para argumentos extras de teste poderia ligar o bypass em produção. | A variável não existe: argumentos extras só por código, e o construtor recusa qualquer um que mexa em permissão, configuração, MCP ou plugin. O prefixo de teste vale para todos os verbos. | Corrigido (tarefas 6 e 7). |
+| S10 | Média | Texto de mensagens, respostas e pedidos de permissão passa pela Vercel e pelo Upstash sem cifra. | Mascaramento com padrões novos (cartão, CEP); `dados` apagado do Redis na confirmação e na expiração; o pedido não vai para o Histórico; `MOISES_SUBIR_TEXTO=0` desliga a subida de texto. | **Em aberto**: sem cifra de ponta a ponta no MVP (`IDEIAS.md`). |
+| S11 | Baixa | Comandos lixo poderiam encher a auditoria ou gastar o teto por minuto. | `dados` limitado a 8.000 caracteres; recusas além de 20 por minuto viram uma linha de resumo; o teto conta só assinatura válida. | Corrigido (tarefa 3). |
+| S12 | Baixa | Conteúdo de sessão na tela e o campo do código. | Nenhum `innerHTML` nem `href` com conteúdo; CSP com `require-trusted-types-for 'script'` e `Cross-Origin-Opener-Policy`; campo do código fora de formulário e sem preenchimento automático. | Corrigido (tarefas 4 e 8). |
+| S13 | Informativa | Sorteio do código, limite de memória do serviço e sessões que morrem com o coletor. | `crypto.randomInt`; o script não imprime o código; unidade do systemd com 4G no repositório; reinício encerra as sessões comandadas, que ficam retomáveis. | Corrigido; reinstalar a unidade depende do seu "pode". |
+
+## Rodada 1: revisão do código (depois da construção)
+
+Revisores: `seguranca` (S14 a S26), modelagem adversarial da revisão diferencial (A1 a A6), `revisor` (R1 a R6), `designer` (D1 a D7) e `/insecure-defaults:audit` (nenhum achado; 16 candidatos refutados). Verificações feitas na sandbox para decidir: com `--restricted`, `cat` e `ls` fora da pasta do projeto **pedem permissão** e `Read` fora da pasta é recusado (spike B7); uma regra `allow` e um hook `PreToolUse` postos em `.claude/settings.json` e `.claude/settings.local.json` do projeto **são ignorados** (spike B8).
+
+| ID | Gravidade | Achado | Decisão |
+|---|---|---|---|
+| A1 | Alta | O código do aparelho é digitado numa página servida pela Vercel. Com a Vercel tomada, a página pode pedir o código de novo e levá-lo embora: assinatura para sempre, sem painel aberto, e execução de código ao aprovar o próprio Bash. A ADR dizia que a chave não saía do navegador. | Corrigir: trocar o código digitado por um par de chaves ECDSA P-256 gerado no navegador, não extraível; o aparelho é autorizado no computador, pelo terminal, conferindo a impressão digital da chave pública. Não existe mais segredo digitado na página. |
+| S15 | Média | Com a Vercel tomada, o painel aberto num aparelho autorizado assina o que o invasor quiser (resto do S1). | Mitigar: o coletor confere de tempos em tempos o SHA-256 dos arquivos servidos pelo painel contra os do repositório e desliga os comandos (`painel_alterado`) se divergirem; pedido marcado como sensível não pode ser aprovado pelo painel; o painel não abre sessão na pasta do próprio coletor. O resto vai a você como risco. |
+| S14 / A2 | Média | Pedido de permissão com "cauda escondida" (muitas linhas em branco ou espaços, ou texto abaixo da rolagem) aparecia como inteiro e podia ser aprovado. | Corrigir: o coletor marca `completo: false` (só Negar) com mais de 30 linhas, 3 ou mais linhas em branco seguidas, 16 ou mais espaços ou tabulações seguidos, ou espaço no fim de linha; letra não ASCII num comando Bash marca o pedido como sensível; o painel mostra o pedido inteiro, sem caixa com rolagem. |
+| S16 | Média | Última resposta e primeiro pedido de **todas** as sessões, inclusive as abertas à mão, sobem sem cifra para Vercel e Upstash; o retrato não expira. | Corrigir em parte: só sessões comandadas pelo painel sobem última resposta e tarefa vinda do pedido; o retrato expira em 24 h. O resto (texto das sessões comandadas sem cifra) vai a você como risco. |
+| R1 | Atenção | Comando assinado com data no futuro escapava do teto por minuto e fazia o arquivo de vistos crescer sem limite. | Corrigir. |
+| S17 / R6 | Baixa | `MOISES_COMANDOS=0` e `MOISES_SUBIR_TEXTO=0` escritos no `coletor.env` não valiam. | Corrigir: as chaves de desligar passam a valer no `coletor.env`. |
+| S18 | Baixa | Encerrar não alcançava processos netos da sessão. | Corrigir: grupo de processos próprio por sessão. |
+| S19 | Baixa | Sem `init`, o modo de permissão não era conferido. | Corrigir: pedido de permissão antes de um `init` conferido é negado. |
+| S20 | Baixa | Corrida ler-alterar-gravar no Redis entre confirmação e expiração. | Em aberto (baixa): pode mostrar "expirado" para um comando que rodou; não executa nada duas vezes. |
+| S21 | Baixa | Recusas em massa empurravam aceitos para fora da auditoria. | Corrigir: aceitos e recusas em arquivos separados. |
+| S22 | Baixa | O coletor antigo em produção executa `encerrar` sem assinatura se o painel novo for publicado antes. | Corrigir: o servidor só entrega comandos a um coletor que anuncia o protocolo novo. |
+| S23 | Baixa | Sessão comandada em `acceptEdits` na pasta do próprio coletor poderia reescrevê-lo. | Corrigir: abrir e retomar recusam a pasta que contém o coletor. |
+| A3 | Baixa | O `visto` (projeto e nome) não distingue duas sessões sem nome do mesmo projeto. | Em aberto (baixa, dentro do S6): quem controla o Redis pode trocar o alvo de uma mensagem entre duas sessões sem nome do mesmo projeto. |
+| A4 | Baixa | Quem tem só o cookie trava o canal (20 pendentes) e mantém o coletor no ritmo rápido. | Corrigir: o servidor só aceita comando de aparelho anunciado pelo coletor; `painelVistoEm` gravado no máximo a cada 30 s; ritmo rápido só com sessão trabalhando ou esperando permissão. |
+| A5, S24 | Informativa | `quem` não autenticado nas recusas; fim do stderr na auditoria. | Corrigir: `quem` só depois da assinatura; auditoria grava só a primeira frase do erro. |
+| A6 | Informativa | O mascaramento não resiste a texto feito para escapar dele. | Registrado: `MOISES_SUBIR_TEXTO=0` é a única defesa real. |
+| S25, S26 | Informativa | Campos do Bash fora da tela; homóglifos. | S26 coberto pela marca de sensível em comando com letra não ASCII; S25 em aberto (não muda o que roda). |
+| R2, R3, R4, R5 | Sugestão | Confirmações perdidas ao parar; auditoria do `abrir` sem a sessão criada; sessão recém-aberta sem `ultimaResposta`; teste dependente de tempo. | Corrigir. |
+| D1, D2 | Sugestão | Motivo "Comandos desligados" repetido no cartão; encerrar com nome vazio sem aviso. | Corrigir. D3 a D7 em aberto (sugestões). |
+| Q1 | Média (qa) | Relógio do celular atrasado era recusado como "demorou mais de 2 minutos", sem mandar acertar a hora. | Corrigir: o coletor distingue relógio atrasado pela idade informada pelo servidor (só para escolher a mensagem; a decisão continua sendo recusar). |
+| Q2 | Baixa (qa) | A pasta de estado do coletor nascia 775 (o módulo de ideias a criava sem modo). Coincide com o endurecimento sugerido pela auditoria de padrões inseguros. | Corrigir: pastas 700 e arquivos 600 em todos os módulos do coletor. |
+| — | Informativa (qa) | Pedidos legítimos com nome de arquivo de 40+ caracteres sem barra, número de 10 dígitos ou `TOKEN_FILE=` saem mascarados e só podem ser negados pelo celular. | Registrado: falha para o lado seguro; aprove esses no computador. |
+
+## Rodada 2: conferência das correções e pontas afiadas
+
+Revisores: `seguranca` (CORRIGIR ANTES DO RELEASE, sem crítica nem alta), `revisor` (APROVADO COM RESSALVAS), `qa` (APROVADO COM RESSALVAS; 142 de 163 mutantes mortos, os sobreviventes equivalentes ou de baixa relevância), `designer` (APROVADO) e `/sharp-edges:sharp-edges` sobre a API de comandos e a configuração do coletor (SE-…). Todos os achados "Corrigir" da rodada 1 foram conferidos como corrigidos, com teste que falha sem a correção.
+
+| ID | Gravidade | Achado | Decisão |
+|---|---|---|---|
+| S27 (= SE-M6) | Média | A conferência do painel publicado (S15) cobria 5 arquivos fixos: `login.html`, `login.js` e o caminho `/` ficavam de fora, e a chave do aparelho pode ser usada por qualquer script da mesma origem. | Corrigir: conferir todos os arquivos de `public/` e `/`; `worker-src 'none'` na CSP. |
+| S28 (= SE-M1) | Média | `MOISES_COMANDOS=0 # comentário`, `export …` ou `desligado` no `coletor.env` deixavam tudo ligado em silêncio. | Corrigir: valor aparado, comentário cortado, valores reconhecidos, valor estranho desliga com aviso, qualquer fonte que desliga vale. |
+| SE-M2 | Média | `MOISES_FERRAMENTAS` aceitava qualquer nome (Task, WebFetch…), e o `init` confiava na lista configurada. | Corrigir: a variável só reduz a lista padrão. |
+| SE-M3 | Média | `--pedidos` imprimia a impressão digital que `--autorizar` pede; copiar do terminal pula a conferência. | Corrigir: `--pedidos` não mostra a impressão; ela é digitada a partir do aparelho; aviso de rótulo repetido. |
+| SE-M4 | Média | O script e o coletor resolviam o arquivo de chaves por variáveis diferentes: revogar podia mexer no arquivo errado. | Corrigir: mesma regra de caminhos; o script imprime o caminho usado. |
+| SE-M5 | Média | "Sensível" e as regras `deny` são lista textual com caminhos fixos; uma sessão de outro projeto podia editar o coletor ou o systemd do usuário com aprovação pelo celular. | Corrigir: caminhos protegidos reais (raiz do coletor, configuração, estado, `~/.config/systemd/user`) negados às ferramentas de arquivo e sensíveis no Bash; mais padrões de ofuscação marcam sensível. Continua heurística, não fronteira (README). |
+| A1-resto | Média (dentro do S15) | Com a Vercel tomada, a página pode pedir um novo pareamento com a chave do invasor e mostrar a impressão dele. | Corrigir em parte: `--autorizar` recusa enquanto a última conferência do painel divergir. O resto fica no S15. |
+| R9 | Média (lead) | O ingest grava o objeto inteiro do comando: dois ingests sobrepostos (envio que estourou o tempo e foi reenviado) podem voltar `feito` para `recebido`. Hipótese mais provável para a falha de 1 em 12 do e2e (não provada: o registro daquela execução não tinha horários). Mesmo defeito de raiz do S20. | Corrigir: resultado de cada etapa gravado uma vez (`HSETNX`) em hashes próprios; o estado só avança. Fecha também o S20. |
+| SE-M7 | Baixa a média | Número inválido num teto (`0,50`) voltava ao padrão, mais frouxo. | Corrigir: vírgula decimal aceita; teto inválido vale o limite mais restritivo. |
+| SE-B1, SE-B2, SE-B3, SE-B4 | Baixa | Construtores sem validação; contador diário corrompido zerava; chaveiro não amarra `kid` à chave; `argsExtra` podia sobrescrever flags fixas. | Corrigir. |
+| SE-B5 | Baixa | `MOISES_CONFERIR_PAINEL=0` não aparece no celular. | Em aberto (baixa): aparece no log de início. |
+| SE-I1 | Informativa | O `init` não confere `plugins`, `skills` e `agents`. | Em aberto: `--restricted` e `--disable-slash-commands` conferidos nos spikes B7 e B8; reconferir a cada atualização do Claude Code (o e2e roda depois de atualizar). |
+| R7 / Q3 | Sugestão / baixa | Teste procurava processo por marcador fixo na máquina toda. | Corrigir. |
+| R8 | Sugestão | Comentário do teto por minuto prometia limitar o arquivo de vistos. | Corrigir. |
+| Q4 | Baixa | Testes deixavam pastas em `/tmp`. | Corrigir. |
+| D8 | Sugestão | O motivo de "Comandos desligados" fica no fim do cartão. | Em aberto (sugestão; segue a decisão D1). |
+| S15-resto, S16-resto | Média | Vercel tomada ainda pode servir conteúdo diferente ao coletor e ao celular; texto das sessões comandadas sem cifra. | Levados ao dono como risco (relatório final). |
+
+## Fase 5: verificação final, `/code-review` e revisão do ramo inteiro
+
+Verificação das correções da rodada 2: `seguranca` (sem crítica nem alta; CORRIGIR ANTES DO RELEASE só pelo aceite do dono em S15-resto e S16-resto), `revisor` (APROVADO COM RESSALVAS), `qa` (APROVADO COM RESSALVAS; 133 de 146 mutantes mortos de saída; dos 13 sobreviventes, 9 morreram com os testes `qa3-*` e 3 foram julgados equivalentes). Spike B9 na sandbox: a regra deny no formato que o orquestrador gera (`Read(//caminho/**)`) **nega** a leitura com o Claude Code instalado; sem a regra, a mesma leitura funciona (controle). Revisão do ramo inteiro (`/superpowers:requesting-code-review`): "pronto com ajustes", nada crítico nem importante. `/code-review` (nível alto): 10 achados, sem verificação independente.
+
+| ID | Gravidade | Achado | Decisão |
+|---|---|---|---|
+| S28-a (= Q5) | Baixa | `coletor.env` com CRLF tinha as linhas ignoradas. | Corrigido (3bb062c). |
+| S28-b | Baixa | Valor estranho em `MOISES_CONFERIR_PAINEL` desligava a conferência (lado inseguro). | Corrigido: valor não reconhecido mantém a conferência ligada. |
+| R10 | Sugestão | Script aceitava `kid` alfanumérico. | Corrigido: regex única hexadecimal. |
+| CR1 | Média | `abrir` respondia "feito" no primeiro evento, antes do `init` conferido. | Corrigido (0a88d71): sucesso só depois do `init` conferido. |
+| CR2 (= RB2) | Média | `interromper` e o `result` tiravam pedidos pendentes sem mandar "negar" ao Claude Code. | Corrigido (0a88d71): deny explícito antes de tirar. |
+| CR3 | Média | Filho que não morre nem com SIGKILL segurava a vaga para sempre. | Corrigido (0a88d71): o registro é finalizado com aviso no log. |
+| CR4 | Baixa | A cota diária não voltava quando o `spawn` falhava. | Corrigido (0a88d71). |
+| CR5 | Baixa | O teto de 20 pendentes no servidor é contado e gravado sem atomicidade. | Em aberto (baixa): o excedente só expira; o porteiro do coletor continua valendo. |
+| CR6 | Baixa | Corpo `null` no ingest dava 500. | Corrigido (0a88d71): 400. |
+| CR7, CR8 | Limpeza | Constantes do contrato duplicadas entre porteiro, orquestrador e servidor. | Corrigido (0a88d71 e 87d33bb): `collector/contrato.js`; as cópias de `api/` e `public/` são conferidas por teste. |
+| CR9 | Limpeza | Limpeza do cache de pastas em O(n·m) a cada ciclo. | Corrigido no `/simplify` (87d33bb), junto com a leitura única de `projetos.json` e das pastas dos projetos por ciclo. |
+| CR10 | Baixa | Contagem de testes desatualizada no `CLAUDE.md`. | Corrigido: 375. |
+| RB3 | Sugestão | Sessão aberta com worktree pode trocar o nome do projeto no cartão na transição. | Em aberto (visual; sem teste real de worktree). |
+| RB4 | Sugestão | "Sair" apaga a chave do aparelho sem avisar que será preciso autorizar de novo. | Em aberto (texto de interface, para o designer). |
+| RB5 | Baixa | Quem tem só o cookie ocupa as 5 vagas de pedido de pareamento por 1 h. | Em aberto (mesmo padrão do A4; o cookie já é credencial do dono). |
+| — | Baixa (qa) | `MOISES_FERRAMENTAS` toda digitada errado volta às seis padrão. | Registrado: o padrão é a lista conservadora; o aviso fica no log. |
+| R11, R12 | Sugestão | Comentários fora do lugar depois da limpeza. | Corrigidos. |
+
+`/simplify` (quatro revisores: reaproveitamento, simplificação, eficiência e altitude): gravação atômica 600 única (`escreverAtomico`), contrato e configuração em módulos próprios (`collector/contrato.js`, `collector/config.js`), chave de sessão partida num lugar só, laço sem E/S repetida, `export`s sem uso removidos; `pastaSoDoDono` passou a valer em todas as gravações e nunca toca a pasta pessoal nem a raiz. Pulados de propósito: IDs de achado nos comentários (ligam o código a este arquivo) e um leitor de JSON genérico (a política de erro muda de um chamador para outro).
